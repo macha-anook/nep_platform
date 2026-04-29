@@ -720,4 +720,261 @@ export const adapter = {
     const { error } = await supabase.from('patient_weekly_logs').delete().eq('id', logId);
     check(null, error, 'deleteWeeklyLog');
   },
+
+  // ── PAPERS ────────────────────────────────────────────────────────────────
+  // All methods return the same normalised flat shape used by the UI so the
+  // frontend never touches raw DB rows directly.
+
+  // Normalise a paper_versions row → UI shape
+  _normVersion(v, paper) {
+    return {
+      id: v.id,
+      groupId: v.paper_id,
+      title: paper?.title || '',
+      compound: paper?.compound || '',
+      status: 'published',
+      version: v.version_number,
+      htmlContent: v.html_content || '',
+      fileName: v.file_name || '',
+      fileData: v.file_data || '',
+      fileSize: v.file_size || 0,
+      notes: v.notes || '',
+      metadata: v.metadata || {},
+      basedOnVersion: v.based_on_version || null,
+      isCurrent: v.is_current,
+      publishedAt: v.published_at ? new Date(v.published_at).getTime() : null,
+      updatedAt: v.published_at ? new Date(v.published_at).getTime() : null,
+      createdAt: paper?.created_at ? new Date(paper.created_at).getTime() : null,
+    };
+  },
+
+  // Normalise a paper_drafts row → UI shape
+  // dynamicNext: pass the live-computed MAX(version)+1 so it stays accurate after sibling publishes
+  _normDraft(d, paper, dynamicNext) {
+    return {
+      id: d.id,
+      groupId: d.paper_id,
+      title: d.title || paper?.title || '',
+      compound: d.compound || paper?.compound || '',
+      status: 'draft',
+      version: null,
+      nextVersion: dynamicNext ?? d.next_version_number,
+      basedOnVersion: d.source_version_number || null,
+      htmlContent: d.html_content || '',
+      fileName: d.file_name || '',
+      fileData: d.file_data || '',
+      fileSize: d.file_size || 0,
+      notes: d.notes || '',
+      metadata: d.metadata || {},
+      publishedAt: null,
+      updatedAt: d.updated_at ? new Date(d.updated_at).getTime() : null,
+      createdAt: d.created_at ? new Date(d.created_at).getTime() : null,
+    };
+  },
+
+  // Returns a unified flat array of drafts + published versions.
+  // If projectId is provided, scopes to that project; otherwise returns all org papers.
+  async listPapers(projectId) {
+    const orgId = await getOrgId();
+
+    let papersQuery = supabase.from('papers').select('*').eq('org_id', orgId);
+    if (projectId) papersQuery = papersQuery.eq('project_id', projectId);
+
+    const { data: paperRows, error: pErr } = await papersQuery;
+    check(paperRows, pErr, 'listPapers/papers');
+
+    if (!paperRows || paperRows.length === 0) return [];
+
+    const paperIds = paperRows.map(p => p.id);
+    const paperMap = Object.fromEntries(paperRows.map(p => [p.id, p]));
+
+    // Fetch all published versions
+    const { data: versionRows, error: vErr } = await supabase
+      .from('paper_versions')
+      .select('*')
+      .in('paper_id', paperIds)
+      .order('version_number', { ascending: true });
+    check(versionRows, vErr, 'listPapers/versions');
+
+    // Fetch all drafts
+    const { data: draftRows, error: dErr } = await supabase
+      .from('paper_drafts')
+      .select('*')
+      .in('paper_id', paperIds)
+      .order('created_at', { ascending: true });
+    check(draftRows, dErr, 'listPapers/drafts');
+
+    // Compute max published version per paper so draft nextVersion is always accurate
+    const maxVerPerPaper = {};
+    (versionRows || []).forEach(v => {
+      maxVerPerPaper[v.paper_id] = Math.max(maxVerPerPaper[v.paper_id] || 0, v.version_number);
+    });
+
+    const result = [];
+    (versionRows || []).forEach(v => result.push(this._normVersion(v, paperMap[v.paper_id])));
+    (draftRows   || []).forEach(d => {
+      const dynamicNext = (maxVerPerPaper[d.paper_id] || 0) + 1;
+      result.push(this._normDraft(d, paperMap[d.paper_id], dynamicNext));
+    });
+    return result;
+  },
+
+  // Create a new paper group + initial draft (called after generation).
+  async createPaperDraft(projectId, data) {
+    const orgId = await getOrgId();
+    const { data: { user } } = await supabase.auth.getUser();
+
+    // Insert the paper group
+    const { data: paper, error: pErr } = await supabase
+      .from('papers')
+      .insert({
+        org_id: orgId,
+        project_id: projectId,
+        title: data.title || '',
+        compound: data.compound || '',
+        current_version: 0,
+        created_by: user.id,
+      })
+      .select()
+      .single();
+    check(paper, pErr, 'createPaperDraft/paper');
+
+    // Insert the draft
+    const { data: draft, error: dErr } = await supabase
+      .from('paper_drafts')
+      .insert({
+        paper_id: paper.id,
+        org_id: orgId,
+        source_version_id: null,
+        source_version_number: null,
+        next_version_number: 1,
+        html_content: data.htmlContent || '',
+        file_name: data.fileName || '',
+        file_data: data.fileData || '',
+        file_size: data.fileSize || 0,
+        title: data.title || '',
+        compound: data.compound || '',
+        notes: data.notes || '',
+        metadata: data.metadata || {},
+        created_by: user.id,
+      })
+      .select()
+      .single();
+    check(draft, dErr, 'createPaperDraft/draft');
+
+    return this._normDraft(draft, paper);
+  },
+
+  // Update a draft's content, notes, or metadata.
+  async updatePaperDraft(draftId, data) {
+    // Recompute next_version_number from DB to keep it accurate
+    const { data: draft, error: fetchErr } = await supabase
+      .from('paper_drafts').select('paper_id').eq('id', draftId).single();
+    check(draft, fetchErr, 'updatePaperDraft/fetch');
+
+    const { data: maxRow } = await supabase
+      .from('paper_versions')
+      .select('version_number')
+      .eq('paper_id', draft.paper_id)
+      .order('version_number', { ascending: false })
+      .limit(1)
+      .maybeSingle();
+    const nextVer = (maxRow?.version_number || 0) + 1;
+
+    const payload = { next_version_number: nextVer, updated_at: new Date().toISOString() };
+    if (data.htmlContent !== undefined) payload.html_content = data.htmlContent;
+    if (data.fileName    !== undefined) payload.file_name    = data.fileName;
+    if (data.fileData    !== undefined) payload.file_data    = data.fileData;
+    if (data.fileSize    !== undefined) payload.file_size    = data.fileSize;
+    if (data.title       !== undefined) payload.title        = data.title;
+    if (data.compound    !== undefined) payload.compound     = data.compound;
+    if (data.notes       !== undefined) payload.notes        = data.notes;
+    if (data.metadata    !== undefined) payload.metadata     = data.metadata;
+
+    const { data: updated, error } = await supabase
+      .from('paper_drafts').update(payload).eq('id', draftId).select().single();
+    check(updated, error, 'updatePaperDraft/update');
+
+    const { data: paper } = await supabase
+      .from('papers').select('*').eq('id', updated.paper_id).single();
+    return this._normDraft(updated, paper);
+  },
+
+  // Publish a draft via the security-definer DB function.
+  // The function atomically computes the version number, creates the version
+  // record, updates papers, and deletes the draft.
+  async publishPaperDraft(draftId, htmlContent) {
+    // Patch html_content if the caller has unsaved in-memory edits
+    if (htmlContent !== undefined) {
+      await supabase
+        .from('paper_drafts')
+        .update({ html_content: htmlContent })
+        .eq('id', draftId);
+    }
+
+    const { data: version, error } = await supabase
+      .rpc('publish_paper_draft', { p_draft_id: draftId });
+    check(version, error, 'publishPaperDraft');
+
+    const { data: paper } = await supabase
+      .from('papers').select('*').eq('id', version.paper_id).single();
+    return this._normVersion(version, paper);
+  },
+
+  // Create a revision draft from the current published version via DB function.
+  async createPaperRevision(paperId) {
+    const { data: draft, error } = await supabase
+      .rpc('create_paper_revision', { p_paper_id: paperId });
+    check(draft, error, 'createPaperRevision');
+
+    const { data: paper } = await supabase
+      .from('papers').select('*').eq('id', draft.paper_id).single();
+    return this._normDraft(draft, paper);
+  },
+
+  // Delete a draft or a published version by its UI id.
+  async deletePaperEntry(id) {
+    // Try draft first
+    const { data: draft } = await supabase
+      .from('paper_drafts').select('id, paper_id').eq('id', id).maybeSingle();
+    if (draft) {
+      const { error } = await supabase.from('paper_drafts').delete().eq('id', id);
+      check(null, error, 'deletePaperEntry/draft');
+      // Clean up paper group if no versions and no other drafts remain
+      const { data: remaining } = await supabase
+        .from('paper_versions').select('id').eq('paper_id', draft.paper_id).limit(1);
+      const { data: remainingDrafts } = await supabase
+        .from('paper_drafts').select('id').eq('paper_id', draft.paper_id).limit(1);
+      if ((!remaining || remaining.length === 0) && (!remainingDrafts || remainingDrafts.length === 0)) {
+        await supabase.from('papers').delete().eq('id', draft.paper_id);
+      }
+      return;
+    }
+
+    // Try published version
+    const { data: version } = await supabase
+      .from('paper_versions').select('id, paper_id').eq('id', id).maybeSingle();
+    if (version) {
+      const { error } = await supabase.from('paper_versions').delete().eq('id', id);
+      check(null, error, 'deletePaperEntry/version');
+      // Re-elect current version if needed
+      const { data: remaining } = await supabase
+        .from('paper_versions').select('id').eq('paper_id', version.paper_id)
+        .order('version_number', { ascending: false }).limit(1);
+      if (remaining && remaining.length > 0) {
+        await supabase.from('paper_versions')
+          .update({ is_current: true }).eq('id', remaining[0].id);
+      } else {
+        // No versions left — clean up paper group if no drafts either
+        const { data: remainingDrafts } = await supabase
+          .from('paper_drafts').select('id').eq('paper_id', version.paper_id).limit(1);
+        if (!remainingDrafts || remainingDrafts.length === 0) {
+          await supabase.from('papers').delete().eq('id', version.paper_id);
+        }
+      }
+      return;
+    }
+
+    throw new Error(`deletePaperEntry: entry ${id} not found`);
+  },
 };

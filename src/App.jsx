@@ -7992,41 +7992,43 @@ const GenerationPanel = ({ outcomes, refs, compound, project, projectId, onBack,
 
       if (setPapers) {
         const reader = new FileReader();
-        reader.onload = () => {
+        reader.onload = async () => {
           try {
             const htmlContent = buildPaperHtml(project, compound, outcomes, refs);
-            const paperEntry = {
-              id: crypto.randomUUID(),
-              groupId: crypto.randomUUID(),
-              title: project?.paper_title||(compound?.name||"")+" Evidence Synthesis",
-              compound: compound?.name||"",
-              status: "draft",
-              version: null,
-              nextVersion: 1,
-              basedOnVersion: null,
+            const draftData = {
+              title: project?.paper_title || (compound?.name || "") + " Evidence Synthesis",
+              compound: compound?.name || "",
               htmlContent,
-              updatedAt: Date.now(), createdAt: Date.now(),
-              fileName: name, fileData: reader.result, fileSize: b.size,
-              notes: "Generated "+new Date().toLocaleDateString("en-GB",{day:"2-digit",month:"short",year:"numeric",hour:"2-digit",minute:"2-digit"}),
-              team: project?.team||[], affiliation: project?.affiliation||"", journal: project?.journal||"",
-              history: [{date:Date.now(),action:"Generated",fileName:name}],
+              fileName: name,
+              fileData: reader.result,
+              fileSize: b.size,
+              notes: "Generated " + new Date().toLocaleDateString("en-GB", {
+                day: "2-digit", month: "short", year: "numeric",
+                hour: "2-digit", minute: "2-digit",
+              }),
+              metadata: {
+                team: project?.team || [],
+                affiliation: project?.affiliation || "",
+                journal: project?.journal || "",
+              },
             };
+            const saved = await API.createPaperDraft(projectId, draftData);
             setPapers(prev => {
-              const existingIdx = prev.findIndex(p => p.compound === paperEntry.compound && p.status !== "published");
+              // Replace existing draft for same compound (regeneration case)
+              const existingIdx = prev.findIndex(
+                p => p.compound === saved.compound && p.status === "draft"
+              );
               if (existingIdx >= 0) {
-                const existing = prev[existingIdx];
                 const next = [...prev];
-                next[existingIdx] = {
-                  ...paperEntry,
-                  id: existing.id,
-                  groupId: existing.groupId || paperEntry.groupId,
-                  nextVersion: existing.nextVersion || 1,
-                };
+                next[existingIdx] = saved;
                 return next;
               }
-              return [...prev, paperEntry];
+              return [...prev, saved];
             });
-          } catch(ex){console.warn("Paper save:",ex);}
+          } catch(ex) {
+            console.error("[Paper save]", ex);
+            toast.error("Paper could not be saved: " + (ex.message || "Unknown error"));
+          }
         };
         reader.readAsDataURL(b);
       }
@@ -10260,6 +10262,9 @@ const _loadStoreForUser = (userId) => {
         patients:        parsed.patients||{},
         patientProgress: parsed.patientProgress||{},
         studies:         sharedStudies || parsed.studies||[],
+        papers:          parsed.papers||{},
+        paperVersions:   parsed.paperVersions||{},
+        paperDrafts:     parsed.paperDrafts||{},
       };
     }
   } catch(e) { /* ignore corrupt storage */ }
@@ -10277,6 +10282,7 @@ const _loadStoreForUser = (userId) => {
     compounds_repo: sharedCompsF||null,
     patients:{}, patientProgress:{},
     studies: sharedStudiesF||[],
+    papers:{}, paperVersions:{}, paperDrafts:{},
   };
 };
 const _loadStore = () => {
@@ -10296,13 +10302,15 @@ const _loadStore = () => {
         u.role = roleMap[u.email.toLowerCase()] || u.role || "researcher";
         return { user:u, jobs:{}, projects:[], outcomes:{},
           refs:{}, compounds:{}, patients:{},
-          patientProgress:{}, studies:[], compounds_repo:null };
+          patientProgress:{}, studies:[], compounds_repo:null,
+          papers:{}, paperVersions:{}, paperDrafts:{} };
       }
     }
   } catch(e) {}
   return { user:null, jobs:{}, projects:[], outcomes:{}, refs:{},
     compounds:{}, patients:{}, patientProgress:{},
-    studies:[], compounds_repo:null };
+    studies:[], compounds_repo:null,
+    papers:{}, paperVersions:{}, paperDrafts:{} };
 };
 const _STORE = _loadStore();
 const _persist = () => {
@@ -10318,6 +10326,9 @@ const _persist = () => {
       patients:        _STORE.patients,
       patientProgress: _STORE.patientProgress,
       studies:         _STORE.studies,
+      papers:          _STORE.papers,
+      paperVersions:   _STORE.paperVersions,
+      paperDrafts:     _STORE.paperDrafts,
     }));
     // Shared keys — visible across all users (compounds + studies)
     if(_STORE.compounds_repo?.length){
@@ -10362,6 +10373,9 @@ const MockAdapter = {
     _STORE.patients       = userData.patients || {};
     _STORE.patientProgress= userData.patientProgress || {};
     _STORE.studies        = userData.studies || [];
+    _STORE.papers         = userData.papers || {};
+    _STORE.paperVersions  = userData.paperVersions || {};
+    _STORE.paperDrafts    = userData.paperDrafts || {};
     // Persist session so role survives page refresh
     localStorage.setItem("nep_session", JSON.stringify(_STORE.user));
     return _STORE.user;
@@ -10665,8 +10679,257 @@ if(outcomes.length<1) issues.push("At least 1 outcome is required");
     _STORE.patients       = userData.patients || {};
     _STORE.patientProgress= userData.patientProgress || {};
     _STORE.studies        = userData.studies || [];
+    _STORE.papers         = userData.papers || {};
+    _STORE.paperVersions  = userData.paperVersions || {};
+    _STORE.paperDrafts    = userData.paperDrafts || {};
     localStorage.setItem("nep_session", JSON.stringify(_STORE.user));
     return _STORE.user;
+  },
+
+  /* ── Papers API ── */
+  async listPapers(projectId){
+    await _delay(200);
+    if(!_STORE.papers) _STORE.papers={};
+    if(!_STORE.paperVersions) _STORE.paperVersions={};
+    if(!_STORE.paperDrafts) _STORE.paperDrafts={};
+    const papers = Object.values(_STORE.papers)
+      .filter(p => !projectId || p.project_id === projectId);
+    return papers.map(paper => {
+      const versions = Object.values(_STORE.paperVersions)
+        .filter(v => v.paper_id === paper.id)
+        .sort((a,b) => b.version_number - a.version_number);
+      const drafts = Object.values(_STORE.paperDrafts)
+        .filter(d => d.paper_id === paper.id);
+      const current = versions.find(v => v.is_current) || versions[0];
+      const maxVer = versions.reduce((mx,v) => Math.max(mx, v.version_number), 0);
+      const result = [];
+      drafts.forEach(draft => {
+        result.push({
+          id: draft.id,
+          groupId: paper.id,
+          title: draft.title || paper.title,
+          compound: draft.compound || paper.compound,
+          version: null,
+          nextVersion: maxVer + 1,
+          basedOnVersion: draft.source_version_number || null,
+          htmlContent: draft.html_content,
+          fileName: draft.file_name,
+          fileData: draft.file_data,
+          fileSize: draft.file_size,
+          notes: draft.notes,
+          metadata: draft.metadata || {},
+          status: "draft",
+          createdAt: draft.created_at,
+          updatedAt: draft.updated_at,
+          projectId: paper.project_id,
+        });
+      });
+      versions.forEach(v => {
+        result.push({
+          id: v.id,
+          groupId: paper.id,
+          title: paper.title,
+          compound: paper.compound,
+          version: v.version_number,
+          nextVersion: null,
+          basedOnVersion: v.based_on_version || null,
+          htmlContent: v.html_content,
+          fileName: v.file_name,
+          fileData: v.file_data,
+          fileSize: v.file_size,
+          notes: v.notes,
+          metadata: v.metadata || {},
+          status: v.is_current ? "published" : "archived",
+          publishedAt: v.published_at,
+          createdAt: v.published_at,
+          projectId: paper.project_id,
+        });
+      });
+      return result;
+    }).flat();
+  },
+  async createPaperDraft(projectId, data){
+    await _delay(300);
+    if(!_STORE.papers) _STORE.papers={};
+    if(!_STORE.paperDrafts) _STORE.paperDrafts={};
+    const paperId = "paper-" + Date.now();
+    const draftId = "draft-" + Date.now();
+    const now = new Date().toISOString();
+    _STORE.papers[paperId] = {
+      id: paperId, project_id: projectId,
+      org_id: _STORE.user?.org || "org-mock",
+      title: data.title || "", compound: data.compound || "",
+      current_version: 0, latest_version_id: null,
+      created_by: _STORE.user?.id, created_at: now, updated_at: now,
+    };
+    const draft = {
+      id: draftId, paper_id: paperId, org_id: _STORE.user?.org || "org-mock",
+      source_version_id: null, source_version_number: null,
+      next_version_number: 1,
+      html_content: data.htmlContent || data.html_content || "",
+      file_name: data.fileName || data.file_name || "",
+      file_data: data.fileData || data.file_data || "",
+      file_size: data.fileSize || data.file_size || 0,
+      title: data.title || "", compound: data.compound || "",
+      notes: data.notes || "", metadata: data.metadata || {},
+      status: "draft", created_by: _STORE.user?.id,
+      created_at: now, updated_at: now,
+    };
+    _STORE.paperDrafts[draftId] = draft;
+    _persist();
+    return {
+      id: draftId, groupId: paperId,
+      title: draft.title, compound: draft.compound,
+      version: null, nextVersion: 1, basedOnVersion: null,
+      htmlContent: draft.html_content, fileName: draft.file_name,
+      fileData: draft.file_data, fileSize: draft.file_size,
+      notes: draft.notes, metadata: draft.metadata,
+      status: "draft", createdAt: now, updatedAt: now,
+      projectId,
+    };
+  },
+  async updatePaperDraft(draftId, data){
+    await _delay(200);
+    if(!_STORE.paperDrafts) _STORE.paperDrafts={};
+    const draft = _STORE.paperDrafts[draftId];
+    if(!draft) throw new Error("Draft not found");
+    if(!_STORE.paperVersions) _STORE.paperVersions={};
+    const nextVer = Object.values(_STORE.paperVersions)
+      .filter(v => v.paper_id === draft.paper_id)
+      .reduce((mx,v) => Math.max(mx, v.version_number), 0) + 1;
+    const now = new Date().toISOString();
+    const updated = {
+      ...draft,
+      html_content: data.htmlContent ?? data.html_content ?? draft.html_content,
+      file_name:    data.fileName   ?? data.file_name    ?? draft.file_name,
+      file_data:    data.fileData   ?? data.file_data    ?? draft.file_data,
+      file_size:    data.fileSize   ?? data.file_size    ?? draft.file_size,
+      title:        data.title    ?? draft.title,
+      compound:     data.compound ?? draft.compound,
+      notes:        data.notes    ?? draft.notes,
+      metadata:     data.metadata ?? draft.metadata,
+      next_version_number: nextVer,
+      updated_at: now,
+    };
+    _STORE.paperDrafts[draftId] = updated;
+    _persist();
+    const paper = _STORE.papers[updated.paper_id];
+    return {
+      id: draftId, groupId: updated.paper_id,
+      title: updated.title, compound: updated.compound,
+      version: null, nextVersion: nextVer, basedOnVersion: updated.source_version_number,
+      htmlContent: updated.html_content, fileName: updated.file_name,
+      fileData: updated.file_data, fileSize: updated.file_size,
+      notes: updated.notes, metadata: updated.metadata,
+      status: "draft", createdAt: updated.created_at, updatedAt: now,
+      projectId: paper?.project_id,
+    };
+  },
+  async publishPaperDraft(draftId, htmlContent){
+    await _delay(400);
+    if(!_STORE.paperDrafts) _STORE.paperDrafts={};
+    if(!_STORE.paperVersions) _STORE.paperVersions={};
+    if(!_STORE.papers) _STORE.papers={};
+    const draft = _STORE.paperDrafts[draftId];
+    if(!draft) throw new Error("Draft not found");
+    if(htmlContent) draft.html_content = htmlContent;
+    const nextVer = Object.values(_STORE.paperVersions)
+      .filter(v => v.paper_id === draft.paper_id)
+      .reduce((mx,v) => Math.max(mx, v.version_number), 0) + 1;
+    Object.values(_STORE.paperVersions)
+      .filter(v => v.paper_id === draft.paper_id)
+      .forEach(v => { v.is_current = false; });
+    const versionId = "ver-" + Date.now();
+    const now = new Date().toISOString();
+    const version = {
+      id: versionId, paper_id: draft.paper_id, org_id: draft.org_id,
+      version_number: nextVer,
+      html_content: draft.html_content, file_name: draft.file_name,
+      file_data: draft.file_data, file_size: draft.file_size,
+      based_on_version: draft.source_version_number,
+      metadata: draft.metadata, notes: draft.notes,
+      is_current: true, published_at: now, created_by: draft.created_by,
+    };
+    _STORE.paperVersions[versionId] = version;
+    const paper = _STORE.papers[draft.paper_id];
+    if(paper){
+      paper.current_version = nextVer;
+      paper.latest_version_id = versionId;
+      paper.title = draft.title;
+      paper.compound = draft.compound;
+      paper.updated_at = now;
+    }
+    delete _STORE.paperDrafts[draftId];
+    _persist();
+    return {
+      id: versionId, groupId: draft.paper_id,
+      title: paper?.title || draft.title, compound: paper?.compound || draft.compound,
+      version: nextVer, nextVersion: null, basedOnVersion: draft.source_version_number,
+      htmlContent: version.html_content, fileName: version.file_name,
+      fileData: version.file_data, fileSize: version.file_size,
+      notes: version.notes, metadata: version.metadata,
+      status: "published", publishedAt: now, createdAt: now,
+      projectId: paper?.project_id,
+    };
+  },
+  async createPaperRevision(paperId){
+    await _delay(300);
+    if(!_STORE.papers) _STORE.papers={};
+    if(!_STORE.paperVersions) _STORE.paperVersions={};
+    if(!_STORE.paperDrafts) _STORE.paperDrafts={};
+    const paper = _STORE.papers[paperId];
+    if(!paper) throw new Error("Paper not found");
+    const current = Object.values(_STORE.paperVersions)
+      .filter(v => v.paper_id === paperId)
+      .sort((a,b) => b.version_number - a.version_number)[0];
+    if(!current) throw new Error("No published version found");
+    const nextVer = current.version_number + 1;
+    const draftId = "draft-" + Date.now();
+    const now = new Date().toISOString();
+    const draft = {
+      id: draftId, paper_id: paperId, org_id: paper.org_id,
+      source_version_id: current.id, source_version_number: current.version_number,
+      next_version_number: nextVer,
+      html_content: current.html_content, file_name: current.file_name,
+      file_data: current.file_data, file_size: current.file_size,
+      title: paper.title, compound: paper.compound,
+      notes: "", metadata: current.metadata || {},
+      status: "draft", created_by: _STORE.user?.id,
+      created_at: now, updated_at: now,
+    };
+    _STORE.paperDrafts[draftId] = draft;
+    _persist();
+    return {
+      id: draftId, groupId: paperId,
+      title: draft.title, compound: draft.compound,
+      version: null, nextVersion: nextVer, basedOnVersion: current.version_number,
+      htmlContent: draft.html_content, fileName: draft.file_name,
+      fileData: draft.file_data, fileSize: draft.file_size,
+      notes: draft.notes, metadata: draft.metadata,
+      status: "draft", createdAt: now, updatedAt: now,
+      projectId: paper.project_id,
+    };
+  },
+  async deletePaperEntry(id){
+    await _delay(200);
+    if(!_STORE.paperDrafts) _STORE.paperDrafts={};
+    if(!_STORE.paperVersions) _STORE.paperVersions={};
+    if(!_STORE.papers) _STORE.papers={};
+    let paperId = null;
+    if(_STORE.paperDrafts[id]){
+      paperId = _STORE.paperDrafts[id].paper_id;
+      delete _STORE.paperDrafts[id];
+    } else if(_STORE.paperVersions[id]){
+      paperId = _STORE.paperVersions[id].paper_id;
+      delete _STORE.paperVersions[id];
+    }
+    if(paperId){
+      const hasDraft = Object.values(_STORE.paperDrafts).some(d => d.paper_id === paperId);
+      const hasVersion = Object.values(_STORE.paperVersions).some(v => v.paper_id === paperId);
+      if(!hasDraft && !hasVersion) delete _STORE.papers[paperId];
+    }
+    _persist();
+    return {ok:true};
   },
 };
 const API = SupabaseAdapter;
@@ -12888,7 +13151,15 @@ export default function App(){
   const [project,setProject]              = useState(null);
   const [outcomes,setOutcomes]             = useState([]);
   const [papers,setPapers]                 = useState([]);
-  const savePapers = (p) => { setPapers(p); };
+
+  const loadPapers = async (projectId) => {
+    try {
+      const list = await API.listPapers(projectId || null);
+      setPapers(list || []);
+    } catch (e) {
+      console.warn('[loadPapers]', e.message);
+    }
+  };
   const [nepStudies,setNepStudies]         = useState([]);
   const [showCreateStudy,setShowCreateStudy] = useState(false);
   const [studiesCollapsed,setStudiesCollapsed] = useState(false);
@@ -12960,6 +13231,7 @@ export default function App(){
 
   useEffect(()=>{ if(nepStudies.length>0) loadAllPatients(); },[nepStudies]);
   useEffect(()=>{ if(activeTab==="studies") loadAllPatients(); },[activeTab]);
+  useEffect(()=>{ if(activeTab==="papers") loadPapers(project?.id||null); },[activeTab]);
 
   // Auto-import outcomes when entering V&G tab if empty
   useEffect(()=>{
@@ -12983,7 +13255,10 @@ export default function App(){
   },[user]);
 
   useEffect(()=>{
-    if(user && user.role !== "doctor") loadProjects();
+    if(user && user.role !== "doctor"){
+      loadProjects();
+      loadPapers(null);
+    }
   },[user]);
 
   /* Load a project */
@@ -12996,6 +13271,7 @@ export default function App(){
         API.listRefs(proj.id),
         API.listCompounds(),
       ]);
+      loadPapers(proj.id);
       const migratedOuts=(outs||[]).map(o=>{
         if((o.compound_id||o.compound_name)&&(!o.compounds||o.compounds.length===0)){
           return {...o,compounds:[{
@@ -13707,48 +13983,53 @@ export default function App(){
                 <div className="fade-in">
                   <PapersPanel
                     papers={papers}
-                    onUpdate={(p) => {
-                      savePapers(papers.map(x => x.id === p.id ? { ...p, updatedAt: Date.now() } : x));
+                    onUpdate={async (p) => {
+                      // Optimistic UI update
+                      setPapers(prev => prev.map(x => x.id === p.id ? { ...p, updatedAt: Date.now() } : x));
+                      try {
+                        if (p.status === "draft") {
+                          await API.updatePaperDraft(p.id, {
+                            htmlContent: p.htmlContent,
+                            notes: p.notes,
+                            title: p.title,
+                            compound: p.compound,
+                            metadata: p.metadata,
+                          });
+                        }
+                      } catch (e) { console.warn('[onUpdate]', e.message); }
                     }}
-                    onPublish={(id, htmlContent) => {
+                    onPublish={async (id, htmlContent) => {
+                      try {
+                        await API.publishPaperDraft(id, htmlContent);
+                        // Reload so all sibling drafts get their nextVersion recomputed
+                        await loadPapers(project?.id || null);
+                      } catch (e) {
+                        console.warn('[onPublish]', e.message);
+                        toast.error("Publish failed: " + e.message);
+                      }
+                    }}
+                    onCreateRevision={async (id) => {
                       const orig = papers.find(p => p.id === id);
                       if (!orig) return;
-                      const publishedVersion = orig.nextVersion || 1;
-                      savePapers(papers.map(p => p.id === id ? {
-                        ...p,
-                        status: "published",
-                        version: publishedVersion,
-                        publishedAt: Date.now(),
-                        updatedAt: Date.now(),
-                        htmlContent: htmlContent || p.htmlContent,
-                        nextVersion: null,
-                        basedOnVersion: null,
-                      } : p));
+                      try {
+                        await API.createPaperRevision(orig.groupId);
+                        await loadPapers(project?.id || null);
+                      } catch (e) {
+                        console.warn('[onCreateRevision]', e.message);
+                        toast.error("Could not create revision: " + e.message);
+                      }
                     }}
-                    onCreateRevision={(id) => {
-                      const orig = papers.find(p => p.id === id);
-                      if (!orig) return;
-                      const gid = orig.groupId || orig.id;
-                      const maxVer = Math.max(...papers
-                        .filter(p => (p.groupId || p.id) === gid && p.status === "published")
-                        .map(p => p.version || 0), 0);
-                      const nextVer = maxVer + 1;
-                      const rev = {
-                        ...orig,
-                        id: crypto.randomUUID(),
-                        groupId: gid,
-                        status: "draft",
-                        version: null,
-                        publishedAt: null,
-                        basedOnVersion: orig.version,
-                        nextVersion: nextVer,
-                        updatedAt: Date.now(),
-                        notes: "",
-                        history: [{ date: Date.now(), action: `Created revision from v${orig.version}`, fileName: orig.fileName || "" }],
-                      };
-                      savePapers([...papers, rev]);
-                    }}
-                    onDelete={(id) => savePapers(papers.filter(p => p.id !== id))}/>
+                    onDelete={async (id) => {
+                      // Optimistic remove
+                      setPapers(prev => prev.filter(p => p.id !== id));
+                      try {
+                        await API.deletePaperEntry(id);
+                      } catch (e) {
+                        console.warn('[onDelete]', e.message);
+                        // Reload to restore state
+                        if (project?.id) loadPapers(project.id);
+                      }
+                    }}/>
                 </div>
               )}
 

@@ -13,6 +13,10 @@ const STORE = {
   refs: {},
   compounds: {},
   jobs: {},
+  // Paper management
+  papers: {},        // { [paperId]: paper_row }
+  paperVersions: {}, // { [paperId]: version_row[] }
+  paperDrafts: {},   // { [draftId]: draft_row }
 };
 
 export const adapter = {
@@ -183,6 +187,313 @@ export const adapter = {
   async pollJob(jobId) {
     await delay(80);
     return STORE.jobs[jobId] || null;
+  },
+
+  // ── PAPERS ────────────────────────────────────────────────────────────────
+  // Returns a unified flat array for the UI:
+  //   drafts  → { ...draft,  status:"draft",     version:null }
+  //   versions→ { ...version, status:"published", id: version.id }
+  // Each item carries groupId (= paper.id) so the UI can link versions together.
+
+  async listPapers(projectId) {
+    await delay(200);
+    const papers = Object.values(STORE.papers)
+      .filter(p => !projectId || p.project_id === projectId);
+    const result = [];
+    for (const paper of papers) {
+      // Published versions
+      const versions = (STORE.paperVersions[paper.id] || [])
+        .sort((a, b) => a.version_number - b.version_number);
+      for (const v of versions) {
+        result.push({
+          id: v.id,
+          groupId: paper.id,
+          title: paper.title,
+          compound: paper.compound,
+          status: 'published',
+          version: v.version_number,
+          htmlContent: v.html_content,
+          fileName: v.file_name,
+          fileData: v.file_data,
+          fileSize: v.file_size,
+          notes: v.notes,
+          metadata: v.metadata,
+          basedOnVersion: v.based_on_version || null,
+          publishedAt: new Date(v.published_at).getTime(),
+          updatedAt: new Date(v.published_at).getTime(),
+          createdAt: new Date(paper.created_at).getTime(),
+          isCurrent: v.is_current,
+        });
+      }
+      // Drafts — nextVersion computed live from max published so it stays accurate
+      const maxVer = versions.reduce((mx, v) => Math.max(mx, v.version_number), 0);
+      const drafts = Object.values(STORE.paperDrafts)
+        .filter(d => d.paper_id === paper.id);
+      for (const d of drafts) {
+        result.push({
+          id: d.id,
+          groupId: paper.id,
+          title: d.title,
+          compound: d.compound,
+          status: 'draft',
+          version: null,
+          nextVersion: maxVer + 1,
+          basedOnVersion: d.source_version_number || null,
+          htmlContent: d.html_content,
+          fileName: d.file_name,
+          fileData: d.file_data,
+          fileSize: d.file_size,
+          notes: d.notes,
+          metadata: d.metadata,
+          publishedAt: null,
+          updatedAt: new Date(d.updated_at).getTime(),
+          createdAt: new Date(d.created_at).getTime(),
+        });
+      }
+    }
+    return result;
+  },
+
+  // Create a new paper group + initial draft in one call.
+  // Called right after generation completes.
+  async createPaperDraft(projectId, data) {
+    await delay(200);
+    const paperId = 'paper-' + Date.now();
+    const draftId = 'draft-' + Date.now();
+    const now = new Date().toISOString();
+
+    STORE.papers[paperId] = {
+      id: paperId,
+      project_id: projectId,
+      title: data.title || '',
+      compound: data.compound || '',
+      current_version: 0,
+      latest_version_id: null,
+      created_at: now,
+      updated_at: now,
+    };
+    STORE.paperVersions[paperId] = [];
+
+    STORE.paperDrafts[draftId] = {
+      id: draftId,
+      paper_id: paperId,
+      source_version_id: null,
+      source_version_number: null,
+      next_version_number: 1,
+      html_content: data.htmlContent || '',
+      file_name: data.fileName || '',
+      file_data: data.fileData || '',
+      file_size: data.fileSize || 0,
+      title: data.title || '',
+      compound: data.compound || '',
+      notes: data.notes || '',
+      metadata: data.metadata || {},
+      status: 'draft',
+      created_at: now,
+      updated_at: now,
+    };
+
+    return {
+      id: draftId,
+      groupId: paperId,
+      title: data.title || '',
+      compound: data.compound || '',
+      status: 'draft',
+      version: null,
+      nextVersion: 1,
+      basedOnVersion: null,
+      htmlContent: data.htmlContent || '',
+      fileName: data.fileName || '',
+      fileData: data.fileData || '',
+      fileSize: data.fileSize || 0,
+      notes: data.notes || '',
+      metadata: data.metadata || {},
+      publishedAt: null,
+      updatedAt: Date.now(),
+      createdAt: Date.now(),
+    };
+  },
+
+  // Update an existing draft's content / notes.
+  async updatePaperDraft(draftId, data) {
+    await delay(150);
+    const draft = STORE.paperDrafts[draftId];
+    if (!draft) throw new Error('Draft not found: ' + draftId);
+    Object.assign(draft, {
+      html_content: data.htmlContent ?? draft.html_content,
+      file_name: data.fileName ?? draft.file_name,
+      file_data: data.fileData ?? draft.file_data,
+      file_size: data.fileSize ?? draft.file_size,
+      title: data.title ?? draft.title,
+      compound: data.compound ?? draft.compound,
+      notes: data.notes ?? draft.notes,
+      metadata: data.metadata ?? draft.metadata,
+      updated_at: new Date().toISOString(),
+    });
+    // Recompute next_version_number dynamically
+    const paperId = draft.paper_id;
+    const maxVer = Math.max(
+      0,
+      ...(STORE.paperVersions[paperId] || []).map(v => v.version_number)
+    );
+    draft.next_version_number = maxVer + 1;
+    return { ...draft };
+  },
+
+  // Publish a draft → creates an immutable version, removes the draft.
+  async publishPaperDraft(draftId, htmlContent) {
+    await delay(250);
+    const draft = STORE.paperDrafts[draftId];
+    if (!draft) throw new Error('Draft not found: ' + draftId);
+
+    const paperId = draft.paper_id;
+    if (!STORE.paperVersions[paperId]) STORE.paperVersions[paperId] = [];
+
+    // Compute version number atomically
+    const maxVer = Math.max(0, ...(STORE.paperVersions[paperId]).map(v => v.version_number));
+    const versionNumber = maxVer + 1;
+    const now = new Date().toISOString();
+    const versionId = 'ver-' + Date.now();
+
+    // Clear current flag on previous versions
+    STORE.paperVersions[paperId].forEach(v => { v.is_current = false; });
+
+    const version = {
+      id: versionId,
+      paper_id: paperId,
+      version_number: versionNumber,
+      html_content: htmlContent ?? draft.html_content,
+      file_name: draft.file_name,
+      file_data: draft.file_data,
+      file_size: draft.file_size,
+      based_on_version: draft.source_version_number || null,
+      metadata: draft.metadata,
+      notes: draft.notes,
+      is_current: true,
+      published_at: now,
+    };
+    STORE.paperVersions[paperId].push(version);
+
+    // Update paper group
+    const paper = STORE.papers[paperId];
+    if (paper) {
+      paper.current_version = versionNumber;
+      paper.latest_version_id = versionId;
+      paper.title = draft.title;
+      paper.compound = draft.compound;
+      paper.updated_at = now;
+    }
+
+    // Remove draft
+    delete STORE.paperDrafts[draftId];
+
+    return {
+      id: versionId,
+      groupId: paperId,
+      title: paper?.title || draft.title,
+      compound: paper?.compound || draft.compound,
+      status: 'published',
+      version: versionNumber,
+      htmlContent: version.html_content,
+      fileName: version.file_name,
+      fileData: version.file_data,
+      fileSize: version.file_size,
+      notes: version.notes,
+      basedOnVersion: version.based_on_version,
+      publishedAt: new Date(now).getTime(),
+      updatedAt: new Date(now).getTime(),
+      isCurrent: true,
+    };
+  },
+
+  // Create a new draft branched from the current published version.
+  async createPaperRevision(paperId) {
+    await delay(200);
+    const paper = STORE.papers[paperId];
+    if (!paper) throw new Error('Paper not found: ' + paperId);
+
+    const versions = STORE.paperVersions[paperId] || [];
+    const current = versions.find(v => v.is_current) || versions[versions.length - 1];
+    if (!current) throw new Error('No published version found for paper: ' + paperId);
+
+    // Next version is always MAX+1 (dynamic)
+    const maxVer = Math.max(0, ...versions.map(v => v.version_number));
+    const nextVer = maxVer + 1;
+    const now = new Date().toISOString();
+    const draftId = 'draft-' + Date.now();
+
+    STORE.paperDrafts[draftId] = {
+      id: draftId,
+      paper_id: paperId,
+      source_version_id: current.id,
+      source_version_number: current.version_number,
+      next_version_number: nextVer,
+      html_content: current.html_content,
+      file_name: current.file_name,
+      file_data: current.file_data,
+      file_size: current.file_size,
+      title: paper.title,
+      compound: paper.compound,
+      notes: '',
+      metadata: current.metadata || {},
+      status: 'draft',
+      created_at: now,
+      updated_at: now,
+    };
+
+    return {
+      id: draftId,
+      groupId: paperId,
+      title: paper.title,
+      compound: paper.compound,
+      status: 'draft',
+      version: null,
+      nextVersion: nextVer,
+      basedOnVersion: current.version_number,
+      htmlContent: current.html_content,
+      fileName: current.file_name,
+      fileData: current.file_data,
+      fileSize: current.file_size,
+      notes: '',
+      metadata: current.metadata || {},
+      publishedAt: null,
+      updatedAt: Date.now(),
+      createdAt: Date.now(),
+    };
+  },
+
+  // Delete a draft or a specific published version.
+  // Pass the UI item id (draftId or versionId).
+  async deletePaperEntry(id) {
+    await delay(150);
+    // Draft?
+    if (STORE.paperDrafts[id]) {
+      delete STORE.paperDrafts[id];
+      return;
+    }
+    // Published version?
+    for (const paperId of Object.keys(STORE.paperVersions)) {
+      const idx = STORE.paperVersions[paperId].findIndex(v => v.id === id);
+      if (idx >= 0) {
+        STORE.paperVersions[paperId].splice(idx, 1);
+        // If the paper has no more versions or drafts, remove the paper group too
+        const remainingVersions = STORE.paperVersions[paperId].length;
+        const remainingDrafts = Object.values(STORE.paperDrafts)
+          .filter(d => d.paper_id === paperId).length;
+        if (remainingVersions === 0 && remainingDrafts === 0) {
+          delete STORE.papers[paperId];
+          delete STORE.paperVersions[paperId];
+        } else {
+          // Re-elect current version
+          const remaining = STORE.paperVersions[paperId];
+          if (remaining.length > 0 && !remaining.some(v => v.is_current)) {
+            remaining[remaining.length - 1].is_current = true;
+          }
+        }
+        return;
+      }
+    }
+    throw new Error('Entry not found: ' + id);
   },
 };
 
