@@ -6,6 +6,9 @@
 // Roles: Doctor (mobile PWA) | Researcher (browser)
 // Data flow: Doctor logs patients → Researcher imports → ESS → Paper
 import React, { useState, useEffect, useCallback, useRef, useMemo, createContext, useContext } from "react";
+import { useEditor, EditorContent } from "@tiptap/react";
+import StarterKit from "@tiptap/starter-kit";
+import { Table, TableRow, TableCell, TableHeader } from "@tiptap/extension-table";
 import { adapter as SupabaseAdapter } from "./adapters/supabase.js";
 /* ─── DESIGN TOKENS ──────────────────────────────────────────────────── */
 const _BUILD_ID = "20260407014636";
@@ -69,6 +72,26 @@ const GlobalStyles = () => (
     @keyframes scoreIn { from { stroke-dashoffset: 310; } to { stroke-dashoffset: var(--offset); } }
     .fade-in { animation: fadeIn 0.25s ease both; }
     .row-hover:hover { background: ${T.bg3} !important; }
+    /* ── ProseMirror / Tiptap editor ── */
+    .ProseMirror { outline: none; min-height: 100%; color: ${T.text0}; font-family: Georgia,'Times New Roman',serif; font-size: 13px; line-height: 1.9; }
+    .ProseMirror h1 { font-size: 20px; color: ${T.text0}; margin: 24px 0 8px; font-weight: 700; font-family: ${T.serif}; }
+    .ProseMirror h2 { font-size: 16px; color: ${T.text1}; margin: 20px 0 6px; font-weight: 700; }
+    .ProseMirror h3 { font-size: 14px; color: ${T.text2}; margin: 16px 0 4px; font-weight: 600; }
+    .ProseMirror p { margin: 0 0 10px; }
+    .ProseMirror ul, .ProseMirror ol { padding-left: 24px; margin-bottom: 10px; }
+    .ProseMirror li { margin-bottom: 3px; }
+    .ProseMirror blockquote { border-left: 3px solid ${T.teal}; margin: 14px 0; padding-left: 14px; color: ${T.text2}; font-style: italic; }
+    .ProseMirror hr { border: none; border-top: 1px solid ${T.border}; margin: 18px 0; }
+    .ProseMirror strong { font-weight: 700; }
+    .ProseMirror em { font-style: italic; }
+    .ProseMirror code { font-family: ${T.mono}; background: ${T.bg3}; padding: 1px 5px; border-radius: 3px; font-size: 12px; }
+    .ProseMirror pre { background: ${T.bg3}; padding: 12px; border-radius: 6px; overflow-x: auto; }
+    .ProseMirror table { width: 100%; border-collapse: collapse; margin: 12px 0 18px; font-size: 12px; }
+    .ProseMirror th { background: ${T.bg4}; color: ${T.text0}; padding: 6px 10px; border: 1px solid ${T.border}; text-align: left; font-weight: 600; }
+    .ProseMirror td { padding: 5px 10px; border: 1px solid ${T.border}; }
+    .ProseMirror tr:nth-child(even) td { background: ${T.bg3}; }
+    .ProseMirror p.is-editor-empty:first-child::before { content: attr(data-placeholder); float: left; color: ${T.text3}; pointer-events: none; height: 0; }
+    .nep-editor-wrap .ProseMirror-focused { outline: none; }
   `}</style>
 );
 
@@ -7446,249 +7469,419 @@ const DoctorPagesPanel = ({ study, allPatients, onBack, onPatientsChange }) => {
 /* ─── PAPERS PANEL ──────────────────────────────────────────────────── */
 const PAPER_SECTIONS = ["Abstract","Introduction","Methods","Results","Discussion","Conclusion","References"];
 
+/* ─── RICH TEXT EDITOR ───────────────────────────────────────────────── */
+const RichTextEditor = ({ content, onChange, readOnly = false }) => {
+  const editor = useEditor({
+    extensions: [
+      StarterKit,
+      Table.configure({ resizable: false }),
+      TableRow,
+      TableHeader,
+      TableCell,
+    ],
+    content: content || "",
+    editable: !readOnly,
+    onUpdate: ({ editor }) => onChange?.(editor.getHTML()),
+  });
+
+  useEffect(() => {
+    if (!editor) return;
+    const incoming = content || "";
+    if (incoming !== editor.getHTML()) {
+      editor.commands.setContent(incoming, false);
+    }
+  }, [content]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  useEffect(() => {
+    if (!editor) return;
+    editor.setEditable(!readOnly);
+  }, [readOnly, editor]);
+
+  if (!editor) return null;
+
+  const TBtn = ({ onClick, label, active }) => (
+    <button
+      onMouseDown={e => { e.preventDefault(); onClick(); }}
+      style={{
+        padding: "3px 9px", fontSize: 11, cursor: "pointer",
+        fontWeight: active ? 700 : 400,
+        background: active ? T.tealBg : "transparent",
+        border: `1px solid ${active ? T.teal : T.border2}`,
+        borderRadius: 4, color: active ? T.teal : T.text2,
+        fontFamily: "inherit", transition: "all 0.1s",
+      }}>
+      {label}
+    </button>
+  );
+
+  const Sep = () => <div style={{ width: 1, background: T.border2, alignSelf: "stretch", margin: "0 2px" }} />;
+
+  return (
+    <div className="nep-editor-wrap" style={{ border: `1px solid ${T.border}`, borderRadius: 8, overflow: "hidden" }}>
+      {!readOnly && (
+        <div style={{
+          display: "flex", gap: 4, flexWrap: "wrap", alignItems: "center",
+          padding: "7px 10px", background: T.bg3, borderBottom: `1px solid ${T.border}`,
+        }}>
+          <TBtn onClick={() => editor.chain().focus().toggleBold().run()} label="Bold" active={editor.isActive("bold")} />
+          <TBtn onClick={() => editor.chain().focus().toggleItalic().run()} label="Italic" active={editor.isActive("italic")} />
+          <Sep />
+          <TBtn onClick={() => editor.chain().focus().toggleHeading({ level: 1 }).run()} label="H1" active={editor.isActive("heading", { level: 1 })} />
+          <TBtn onClick={() => editor.chain().focus().toggleHeading({ level: 2 }).run()} label="H2" active={editor.isActive("heading", { level: 2 })} />
+          <TBtn onClick={() => editor.chain().focus().toggleHeading({ level: 3 }).run()} label="H3" active={editor.isActive("heading", { level: 3 })} />
+          <Sep />
+          <TBtn onClick={() => editor.chain().focus().toggleBulletList().run()} label="• List" active={editor.isActive("bulletList")} />
+          <TBtn onClick={() => editor.chain().focus().toggleOrderedList().run()} label="1. List" active={editor.isActive("orderedList")} />
+          <TBtn onClick={() => editor.chain().focus().toggleBlockquote().run()} label="Quote" active={editor.isActive("blockquote")} />
+          <Sep />
+          <TBtn onClick={() => editor.chain().focus().undo().run()} label="↩ Undo" active={false} />
+          <TBtn onClick={() => editor.chain().focus().redo().run()} label="↪ Redo" active={false} />
+        </div>
+      )}
+      <div style={{
+        background: readOnly ? T.bg2 : T.bg1,
+        padding: "20px 28px",
+        minHeight: readOnly ? 180 : 480,
+        maxHeight: 640,
+        overflowY: "auto",
+      }}>
+        <EditorContent editor={editor} />
+      </div>
+    </div>
+  );
+};
+
 const PapersPanel = ({ papers, onUpdate, onPublish, onCreateRevision, onDelete }) => {
-  const [viewingId, setViewingId] = useState(null);
-  const fileInputRef = useRef(null);
-  const paper = papers.find(p=>p.id===viewingId);
-  const inProgress = papers.filter(p=>p.status!=="published").sort((a,b)=>(b.updatedAt||0)-(a.updatedAt||0));
-  const published  = papers.filter(p=>p.status==="published").sort((a,b)=>(b.publishedAt||0)-(a.publishedAt||0));
+  const [view, setView] = useState("list"); // "list" | "draft" | "published" | "version"
+  const [selectedId, setSelectedId] = useState(null);
+  const [viewingVersionId, setViewingVersionId] = useState(null);
+  const [draftContent, setDraftContent] = useState("");
+  const [contentChanged, setContentChanged] = useState(false);
+
   const fmtDate = (ts) => ts ? new Date(ts).toLocaleDateString("en-GB",{day:"2-digit",month:"short",year:"numeric"}) : "—";
 
-  // Upload handler
-  const handleUpload = (e) => {
-    const file = e.target.files?.[0];
-    if(!file || !paper) return;
-    const reader = new FileReader();
-    reader.onload = (ev) => {
-      const updated = {
-        ...paper,
-        fileName: file.name,
-        fileSize: file.size,
-        fileData: ev.target.result,
-        fileType: file.type || "application/msword",
-        updatedAt: Date.now(),
-        history: [...(paper.history||[]), {date:Date.now(), action:"Uploaded edited version", fileName:file.name}],
-      };
-      onUpdate(updated);
-      alert("✓ File uploaded and saved against v" + paper.version);
-    };
-    reader.readAsDataURL(file);
-    e.target.value = "";
+  const drafts = papers.filter(p => p.status !== "published")
+    .sort((a,b) => (b.updatedAt||0) - (a.updatedAt||0));
+
+  // Group published papers by groupId — show only the latest per group in the list
+  const publishedGroupMap = {};
+  papers.filter(p => p.status === "published").forEach(p => {
+    const gid = p.groupId || p.id;
+    if (!publishedGroupMap[gid] || (p.version||0) > (publishedGroupMap[gid].version||0)) {
+      publishedGroupMap[gid] = p;
+    }
+  });
+  const latestPublished = Object.values(publishedGroupMap)
+    .sort((a,b) => (b.publishedAt||0) - (a.publishedAt||0));
+
+  const getVersionHistory = (paper) => {
+    const gid = paper.groupId || paper.id;
+    return papers
+      .filter(p => p.status === "published" && (p.groupId || p.id) === gid)
+      .sort((a,b) => (b.version||0) - (a.version||0));
   };
 
-  // Download the uploaded file
-  const downloadFile = (p) => {
-    if(!p.fileData) return;
-    const a = document.createElement("a");
-    a.href = p.fileData;
-    a.download = p.fileName || "paper.doc";
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
+  const paper = papers.find(p => p.id === selectedId);
+  const viewingVersion = papers.find(p => p.id === viewingVersionId);
+
+  const goBack = () => {
+    setView("list");
+    setSelectedId(null);
+    setViewingVersionId(null);
+    setDraftContent("");
+    setContentChanged(false);
   };
 
-  // ── Paper detail view ──
-  if(viewingId && paper) {
+  const openDraft = (p) => {
+    setSelectedId(p.id);
+    setDraftContent(p.htmlContent || "");
+    setContentChanged(false);
+    setView("draft");
+  };
+
+  const openPublished = (p) => {
+    setSelectedId(p.id);
+    setView("published");
+  };
+
+  const saveDraft = () => {
+    if (!paper) return;
+    onUpdate({ ...paper, htmlContent: draftContent, updatedAt: Date.now() });
+    setContentChanged(false);
+  };
+
+  // ── Archived version viewer ──
+  if (view === "version" && viewingVersion) {
     return (
       <div className="fade-in">
-        {/* Header */}
         <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:20}}>
-          <button onClick={()=>setViewingId(null)}
-            style={{background:"none",border:"none",color:T.teal,cursor:"pointer",
-              fontSize:13,fontFamily:"inherit"}}>← Back to papers</button>
+          <button onClick={() => { setView("published"); setViewingVersionId(null); }}
+            style={{background:"none",border:"none",color:T.teal,cursor:"pointer",fontSize:13,fontFamily:"inherit"}}>
+            ← Back to paper
+          </button>
+          <Tag color={T.purple}>v{viewingVersion.version} — Archived</Tag>
+        </div>
+        <div style={{background:T.bg2,borderRadius:10,padding:16,border:`1px solid ${T.border}`,marginBottom:12}}>
+          <div style={{fontSize:16,fontWeight:700,color:"#F0F6FF",fontFamily:"'DM Serif Display',serif",marginBottom:4}}>
+            {viewingVersion.title || "Untitled"}
+          </div>
+          <div style={{fontSize:11,color:T.text3}}>
+            v{viewingVersion.version} · Published {fmtDate(viewingVersion.publishedAt)}
+          </div>
+        </div>
+        <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",
+          background:T.amberBg,border:`1px solid ${T.amber}30`,borderRadius:8,
+          padding:"9px 14px",marginBottom:16}}>
+          <span style={{fontSize:12,color:T.amber}}>
+            Viewing archived version v{viewingVersion.version} — read-only
+          </span>
+          {viewingVersion.fileData && (
+            <button onClick={() => { const a=document.createElement("a"); a.href=viewingVersion.fileData; a.download=viewingVersion.fileName||`paper_v${viewingVersion.version}.docx`; document.body.appendChild(a); a.click(); document.body.removeChild(a); }}
+              style={{fontSize:12,color:T.teal,background:"none",
+                border:`1px solid ${T.teal}40`,borderRadius:5,padding:"4px 12px",
+                cursor:"pointer",fontFamily:"inherit",flexShrink:0,marginLeft:12}}>
+              ↓ Download v{viewingVersion.version} .docx
+            </button>
+          )}
+        </div>
+        <RichTextEditor content={viewingVersion.htmlContent || ""} readOnly={true} />
+      </div>
+    );
+  }
+
+  // ── Published paper detail view ──
+  if (view === "published" && paper) {
+    const versionHistory = getVersionHistory(paper);
+    const downloadFile = (p) => {
+      if (!p.fileData) return;
+      const a = document.createElement("a"); a.href = p.fileData;
+      a.download = p.fileName || "paper.docx"; document.body.appendChild(a);
+      a.click(); document.body.removeChild(a);
+    };
+    return (
+      <div className="fade-in">
+        <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:20}}>
+          <button onClick={goBack}
+            style={{background:"none",border:"none",color:T.teal,cursor:"pointer",fontSize:13,fontFamily:"inherit"}}>
+            ← Back to papers
+          </button>
           <div style={{display:"flex",gap:8,alignItems:"center"}}>
-            <Tag color={paper.status==="published"?T.green:T.amber}>
-              {paper.status==="published"?"Published":"In Progress"}
-            </Tag>
+            <Tag color={T.green}>Published</Tag>
             <Tag color={T.purple}>v{paper.version}</Tag>
           </div>
         </div>
 
-        {/* Paper info card */}
-        <div style={{background:T.bg2,borderRadius:10,padding:20,border:`1px solid ${T.border}`,marginBottom:16}}>
-          <div style={{fontSize:18,fontWeight:700,color:"#F0F6FF",fontFamily:"'DM Serif Display',serif",
-            marginBottom:6}}>
-            {paper.title||"Untitled paper"}
+        <div style={{background:T.bg2,borderRadius:10,padding:20,border:`1px solid ${T.green}30`,marginBottom:16}}>
+          <div style={{fontSize:18,fontWeight:700,color:"#F0F6FF",fontFamily:"'DM Serif Display',serif",marginBottom:6}}>
+            {paper.title || "Untitled paper"}
           </div>
-          <div style={{fontSize:12,color:T.text3,marginBottom:12}}>
-            {paper.compound||"—"} · v{paper.version} · {fmtDate(paper.updatedAt||paper.createdAt)}
-            {paper.status==="published"&&paper.publishedAt&&` · Published ${fmtDate(paper.publishedAt)}`}
+          <div style={{fontSize:12,color:T.text3,marginBottom:16}}>
+            {paper.compound || "—"} · Published {fmtDate(paper.publishedAt)} · v{paper.version}
+            {paper.fileData && (
+              <button onClick={() => downloadFile(paper)}
+                style={{marginLeft:12,fontSize:11,color:T.teal,background:"none",
+                  border:`1px solid ${T.teal}40`,borderRadius:5,padding:"3px 10px",
+                  cursor:"pointer",fontFamily:"inherit"}}>
+                ↓ Download .docx
+              </button>
+            )}
           </div>
 
-          {/* File status */}
-          <div style={{background:T.bg3,borderRadius:8,padding:14,border:`1px solid ${T.border}`,marginBottom:16}}>
-            {paper.fileData?(
-              <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
-                <div>
-                  <div style={{fontSize:13,color:"#F0F6FF",fontWeight:500}}>{paper.fileName||"paper.doc"}</div>
-                  <div style={{fontSize:10,color:T.text3}}>
-                    {Math.round((paper.fileSize||0)/1024)} KB · uploaded {fmtDate(paper.updatedAt)}
+          {/* Version history panel */}
+          {versionHistory.length > 0 && (
+            <div style={{background:T.bg3,borderRadius:8,padding:12,border:`1px solid ${T.border}`,marginBottom:16}}>
+              <div style={{fontSize:10,color:T.teal,fontWeight:700,textTransform:"uppercase",
+                letterSpacing:"0.06em",marginBottom:10}}>
+                Version History ({versionHistory.length} version{versionHistory.length>1?"s":""})
+              </div>
+              {versionHistory.map((v,i) => (
+                <div key={v.id} style={{display:"flex",justifyContent:"space-between",alignItems:"center",
+                  padding:"7px 0",borderBottom:i<versionHistory.length-1?`1px solid ${T.border}`:"none"}}>
+                  <div style={{display:"flex",gap:10,alignItems:"center"}}>
+                    {i === 0
+                      ? <Tag color={T.green} style={{fontSize:9}}>Current</Tag>
+                      : <Tag color={T.text3} style={{fontSize:9}}>Archive</Tag>}
+                    <span style={{fontSize:13,color:"#F0F6FF",fontWeight:i===0?700:400}}>v{v.version}</span>
+                    <span style={{fontSize:11,color:T.text3}}>{fmtDate(v.publishedAt)}</span>
                   </div>
-                </div>
-                <div style={{display:"flex",gap:8}}>
-                  <button onClick={()=>downloadFile(paper)}
-                    style={{fontSize:12,color:T.teal,background:"none",border:`1px solid ${T.teal}40`,
-                      borderRadius:6,padding:"6px 14px",cursor:"pointer",fontFamily:"inherit"}}>
-                    ↓ Download
-                  </button>
-                  {paper.status!=="published"&&(
-                    <button onClick={()=>fileInputRef.current?.click()}
-                      style={{fontSize:12,color:T.amber,background:"none",border:`1px solid ${T.amber}40`,
-                        borderRadius:6,padding:"6px 14px",cursor:"pointer",fontFamily:"inherit"}}>
-                      ↑ Replace file
+                  {i > 0 && (
+                    <button onClick={() => { setViewingVersionId(v.id); setView("version"); }}
+                      style={{fontSize:11,color:T.teal,background:"none",
+                        border:`1px solid ${T.teal}40`,borderRadius:5,padding:"3px 10px",
+                        cursor:"pointer",fontFamily:"inherit"}}>
+                      View
                     </button>
                   )}
-                </div>
-              </div>
-            ):(
-              <div style={{textAlign:"center",padding:"20px 0"}}>
-                <div style={{fontSize:13,color:T.text3,marginBottom:10}}>
-                  No file uploaded yet. Download the generated .doc, edit in Microsoft Word, then upload here.
-                </div>
-                {paper.status!=="published"&&(
-                  <button onClick={()=>fileInputRef.current?.click()}
-                    style={{fontSize:13,color:T.teal,background:T.bg2,border:`1px solid ${T.teal}`,
-                      borderRadius:8,padding:"10px 24px",cursor:"pointer",fontFamily:"inherit",fontWeight:600}}>
-                    ↑ Upload edited .doc / .docx
-                  </button>
-                )}
-              </div>
-            )}
-            <input ref={fileInputRef} type="file" accept=".doc,.docx,.pdf"
-              onChange={handleUpload} style={{display:"none"}}/>
-          </div>
-
-          {/* Workflow steps */}
-          <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:8}}>
-            {[
-              {step:"1",label:"Generate",desc:"Download .doc from V&G tab",done:true,color:T.green},
-              {step:"2",label:"Edit in Word",desc:paper.fileData?"File uploaded ✓":"Edit & upload .doc",
-                done:!!paper.fileData,color:paper.fileData?T.green:T.amber},
-              {step:"3",label:"Publish",desc:paper.status==="published"?"Published ✓":"Click publish when ready",
-                done:paper.status==="published",color:paper.status==="published"?T.green:"#5A7A9A"},
-            ].map(s=>(
-              <div key={s.step} style={{background:T.bg3,borderRadius:8,padding:"12px 14px",
-                border:`1px solid ${s.done?s.color+"40":T.border}`,textAlign:"center"}}>
-                <div style={{fontSize:20,marginBottom:4,color:s.done?s.color:"#5A7A9A"}}>
-                  {s.done?"✓":s.step}
-                </div>
-                <div style={{fontSize:12,fontWeight:600,color:"#F0F6FF"}}>{s.label}</div>
-                <div style={{fontSize:10,color:T.text3,marginTop:2}}>{s.desc}</div>
-              </div>
-            ))}
-          </div>
-        </div>
-
-        {/* Notes / description */}
-        {paper.status!=="published"&&(
-          <div style={{background:T.bg2,borderRadius:10,padding:16,border:`1px solid ${T.border}`,marginBottom:16}}>
-            <div style={{fontSize:10,color:T.teal,fontWeight:700,textTransform:"uppercase",
-              letterSpacing:"0.06em",marginBottom:8}}>Notes</div>
-            <textarea value={paper.notes||""} onChange={e=>onUpdate({...paper,notes:e.target.value})}
-              placeholder="Add notes about this version (e.g. what was changed, reviewer feedback)…"
-              style={{width:"100%",minHeight:80,fontSize:13,lineHeight:1.6,color:"#F0F6FF",
-                fontFamily:"inherit",padding:10,borderRadius:6,background:T.bg3,
-                border:`1px solid ${T.border2}`,resize:"vertical",boxSizing:"border-box"}}/>
-          </div>
-        )}
-
-        
-          {paper.history?.length>0&&(
-            <div style={{background:T.bg2,borderRadius:10,padding:16,border:`1px solid ${T.border}`,marginBottom:16}}>
-              <div style={{fontSize:10,color:T.teal,fontWeight:700,textTransform:"uppercase",
-                letterSpacing:"0.06em",marginBottom:8}}>Version history</div>
-              {paper.history.map((h,i)=>(
-                <div key={i} style={{fontSize:11,color:T.text3,padding:"4px 0",
-                  borderBottom:i<paper.history.length-1?`1px solid ${T.border}`:"none"}}>
-                  <span style={{color:"#F0F6FF",marginRight:8}}>
-                    {new Date(h.date).toLocaleDateString("en-GB",{day:"2-digit",month:"short",hour:"2-digit",minute:"2-digit"})}
-                  </span>
-                  {h.action} — {h.fileName||""}
                 </div>
               ))}
             </div>
           )}
 
           {/* Actions */}
-        <div style={{display:"flex",gap:10,justifyContent:"flex-end"}}>
-          {paper.status!=="published"&&(
-            <Btn onClick={()=>{
-              if(confirm("Publish this paper? It will be locked. You can create a revision later.")){
-                onPublish(paper.id);
-                setViewingId(null);
-              }
-            }} style={{padding:"11px 28px",fontSize:14,fontWeight:700}}>
-              ✓ Publish v{paper.version}
+          <div style={{display:"flex",gap:10,justifyContent:"flex-end"}}>
+            <Btn onClick={() => { onCreateRevision(paper.id); goBack(); }}
+              style={{padding:"10px 24px",fontSize:13,fontWeight:600}}>
+              Edit &amp; Republish →
             </Btn>
-          )}
-          {paper.status==="published"&&(
-            <Btn variant="secondary" onClick={()=>{
-              onCreateRevision(paper.id);
-              setViewingId(null);
-            }}>
-              Create revision (v{(Number(paper.version)+0.1).toFixed(1)})
+            <Btn variant="secondary" onClick={() => {
+              if (confirm(`Delete published v${paper.version}?`)) { onDelete(paper.id); goBack(); }
+            }} style={{color:T.red,borderColor:T.red+"40"}}>
+              Delete
             </Btn>
-          )}
-          <Btn variant="secondary" onClick={()=>{
-            if(confirm("Delete this paper permanently?")){ onDelete(paper.id); setViewingId(null); }
+          </div>
+        </div>
+
+        <div style={{fontSize:10,color:T.text3,marginBottom:8,display:"flex",alignItems:"center",gap:6}}>
+          <span style={{color:T.green}}>●</span> Published version — read-only
+        </div>
+        <RichTextEditor content={paper.htmlContent || ""} readOnly={true} />
+      </div>
+    );
+  }
+
+  // ── Draft editor view ──
+  if (view === "draft" && paper) {
+    const isDraftFromPublished = paper.basedOnVersion != null;
+    const targetVersion = paper.nextVersion || 1;
+    return (
+      <div className="fade-in">
+        <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:16}}>
+          <button onClick={() => {
+            if (contentChanged && !confirm("Discard unsaved changes?")) return;
+            goBack();
+          }} style={{background:"none",border:"none",color:T.teal,cursor:"pointer",fontSize:13,fontFamily:"inherit"}}>
+            ← Back to papers
+          </button>
+          <div style={{display:"flex",gap:8,alignItems:"center"}}>
+            <Tag color={T.amber}>Draft</Tag>
+            <Tag color={T.purple}>→ v{targetVersion}</Tag>
+          </div>
+        </div>
+
+        {/* Contextual banner for revision drafts */}
+        {isDraftFromPublished && (
+          <div style={{background:T.blueBg,border:`1px solid ${T.blue}30`,borderRadius:8,
+            padding:"10px 16px",marginBottom:16,display:"flex",alignItems:"flex-start",gap:12}}>
+            <span style={{fontSize:20,color:T.blue,flexShrink:0,lineHeight:1}}>ⓘ</span>
+            <div>
+              <div style={{fontSize:13,color:T.blue,fontWeight:600,marginBottom:2}}>
+                Editing based on Published Version v{paper.basedOnVersion}
+              </div>
+              <div style={{fontSize:11,color:T.text2}}>
+                New version will be published as <strong style={{color:T.text0}}>v{targetVersion}</strong>.
+                Published versions are read-only and will not be modified.
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* Paper title bar */}
+        <div style={{background:T.bg2,borderRadius:10,padding:16,border:`1px solid ${T.border}`,marginBottom:16}}>
+          <div style={{fontSize:16,fontWeight:700,color:"#F0F6FF",fontFamily:"'DM Serif Display',serif",marginBottom:4}}>
+            {paper.title || "Untitled paper"}
+          </div>
+          <div style={{fontSize:11,color:T.text3,display:"flex",alignItems:"center",gap:8}}>
+            <span>{paper.compound || "—"}</span>
+            <span>·</span>
+            <span>Last saved {fmtDate(paper.updatedAt)}</span>
+            {contentChanged && <span style={{color:T.amber}}>● Unsaved changes</span>}
+          </div>
+        </div>
+
+        {/* Rich text editor */}
+        <RichTextEditor
+          content={draftContent}
+          onChange={(html) => { setDraftContent(html); setContentChanged(true); }}
+          readOnly={false}
+        />
+
+        {/* Notes */}
+        <div style={{background:T.bg2,borderRadius:10,padding:16,border:`1px solid ${T.border}`,marginTop:16,marginBottom:16}}>
+          <div style={{fontSize:10,color:T.teal,fontWeight:700,textTransform:"uppercase",
+            letterSpacing:"0.06em",marginBottom:8}}>Notes</div>
+          <textarea
+            value={paper.notes || ""}
+            onChange={e => onUpdate({ ...paper, notes: e.target.value })}
+            placeholder="Add notes about this version (reviewer feedback, what changed, etc.)…"
+            style={{width:"100%",minHeight:72,fontSize:13,lineHeight:1.6,color:"#F0F6FF",
+              fontFamily:"inherit",padding:10,borderRadius:6,background:T.bg3,
+              border:`1px solid ${T.border2}`,resize:"vertical",boxSizing:"border-box"}}
+          />
+        </div>
+
+        {/* Action bar */}
+        <div style={{display:"flex",gap:10,justifyContent:"flex-end",marginBottom:24}}>
+          <Btn variant="secondary" onClick={saveDraft}>
+            Save Draft
+          </Btn>
+          <Btn onClick={() => {
+            if (contentChanged) saveDraft();
+            if (confirm(`Publish as v${targetVersion}? This draft will be locked and moved to Published.`)) {
+              onPublish(paper.id, draftContent);
+              goBack();
+            }
+          }} style={{padding:"11px 28px",fontSize:14,fontWeight:700}}>
+            ✓ Publish v{targetVersion}
+          </Btn>
+          <Btn variant="secondary" onClick={() => {
+            if (confirm("Delete this draft permanently?")) { onDelete(paper.id); goBack(); }
           }} style={{color:T.red,borderColor:T.red+"40"}}>
-            Delete
+            Delete Draft
           </Btn>
         </div>
       </div>
     );
   }
 
-  // ── Paper list view ──
+  // ── List view ──
   return (
     <div className="fade-in">
       <SectionHeader title="Papers"
-        subtitle={`${papers.length} paper(s) · ${published.length} published · ${inProgress.length} in progress`}/>
+        subtitle={`${latestPublished.length} published · ${drafts.length} in progress`}/>
 
-      {papers.length===0?(
+      {papers.length === 0 ? (
         <div style={{textAlign:"center",padding:"60px 20px",
           border:`1px dashed ${T.border2}`,borderRadius:8,marginTop:16}}>
           <div style={{fontSize:32,marginBottom:12,opacity:0.3}}>📄</div>
           <p style={{fontSize:13,color:T.text3}}>
-            No papers yet. Go to Validate & Generate → Download .doc to create your first paper.
+            No papers yet. Go to Validate &amp; Generate to create your first paper.
           </p>
         </div>
-      ):(
+      ) : (
         <div style={{marginTop:16}}>
-          {inProgress.length>0&&(
-            <div style={{marginBottom:24}}>
+
+          {/* ── In Progress ── */}
+          {drafts.length > 0 && (
+            <div style={{marginBottom:28}}>
               <div style={{fontSize:11,color:T.amber,fontWeight:700,textTransform:"uppercase",
                 letterSpacing:"0.08em",marginBottom:10}}>
-                In Progress & Drafts ({inProgress.length})
+                In Progress ({drafts.length})
               </div>
               <div style={{display:"flex",flexDirection:"column",gap:8}}>
-                {inProgress.map(p=>(
+                {drafts.map(p => (
                   <div key={p.id} style={{background:T.bg2,borderRadius:10,padding:14,
                     border:`1px solid ${T.border}`,cursor:"pointer"}}
-                    onClick={()=>setViewingId(p.id)}>
+                    onClick={() => openDraft(p)}>
                     <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start"}}>
                       <div style={{flex:1,minWidth:0}}>
                         <div style={{fontSize:13,fontWeight:600,color:"#F0F6FF",marginBottom:3,
                           overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>
-                          {p.title||"Untitled"}
+                          {p.title || "Untitled"}
                         </div>
                         <div style={{fontSize:11,color:T.text3}}>
-                          {p.compound||"—"} · v{p.version} · {fmtDate(p.updatedAt)}
-                          {p.fileData?" · 📎 File attached":""}
+                          {p.compound || "—"} · {fmtDate(p.updatedAt)}
+                          {p.basedOnVersion != null && (
+                            <span style={{color:T.blue,marginLeft:8}}>
+                              ← Based on v{p.basedOnVersion} · Publishing as v{p.nextVersion}
+                            </span>
+                          )}
                         </div>
-                        {p.notes&&(
-                          <div style={{fontSize:10,color:T.text3,fontStyle:"italic",marginTop:2,
-                            overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>
-                            {p.notes.slice(0,100)}
-                          </div>
-                        )}
                       </div>
                       <div style={{display:"flex",gap:6,alignItems:"center",flexShrink:0,marginLeft:8}}>
-                        <Tag color={T.amber} style={{fontSize:10}}>In Progress</Tag>
-                        <button onClick={e=>{e.stopPropagation();
-                          if(confirm("Delete?")) onDelete(p.id);
-                        }} style={{fontSize:10,color:T.red,background:"none",border:"none",
-                          cursor:"pointer",opacity:0.5}}>✕</button>
+                        <Tag color={T.amber} style={{fontSize:10}}>Draft → v{p.nextVersion||1}</Tag>
+                        <button onClick={e => { e.stopPropagation(); if(confirm("Delete this draft?")) onDelete(p.id); }}
+                          style={{fontSize:10,color:T.red,background:"none",border:"none",
+                            cursor:"pointer",opacity:0.5,padding:"2px 4px"}}>✕</button>
                       </div>
                     </div>
                   </div>
@@ -7696,34 +7889,48 @@ const PapersPanel = ({ papers, onUpdate, onPublish, onCreateRevision, onDelete }
               </div>
             </div>
           )}
-          {published.length>0&&(
+
+          {/* ── Published ── */}
+          {latestPublished.length > 0 && (
             <div>
               <div style={{fontSize:11,color:T.green,fontWeight:700,textTransform:"uppercase",
                 letterSpacing:"0.08em",marginBottom:10}}>
-                Published ({published.length})
+                Published ({latestPublished.length})
               </div>
               <div style={{display:"flex",flexDirection:"column",gap:8}}>
-                {published.map(p=>(
-                  <div key={p.id} style={{background:T.bg2,borderRadius:10,padding:14,
-                    border:`1px solid ${T.green}30`,cursor:"pointer"}}
-                    onClick={()=>setViewingId(p.id)}>
-                    <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start"}}>
-                      <div style={{flex:1,minWidth:0}}>
-                        <div style={{fontSize:13,fontWeight:600,color:"#F0F6FF",marginBottom:3}}>
-                          {p.title||"Untitled"}
+                {latestPublished.map(p => {
+                  const allVersions = getVersionHistory(p);
+                  return (
+                    <div key={p.id} style={{background:T.bg2,borderRadius:10,padding:14,
+                      border:`1px solid ${T.green}30`,cursor:"pointer"}}
+                      onClick={() => openPublished(p)}>
+                      <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start"}}>
+                        <div style={{flex:1,minWidth:0}}>
+                          <div style={{fontSize:13,fontWeight:600,color:"#F0F6FF",marginBottom:3,
+                            overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>
+                            {p.title || "Untitled"}
+                          </div>
+                          <div style={{fontSize:11,color:T.text3}}>
+                            {p.compound || "—"} · v{p.version} · Published {fmtDate(p.publishedAt)}
+                            {allVersions.length > 1 && (
+                              <span style={{color:T.purple,marginLeft:8}}>
+                                {allVersions.length} versions
+                              </span>
+                            )}
+                          </div>
                         </div>
-                        <div style={{fontSize:11,color:T.text3}}>
-                          {p.compound||"—"} · v{p.version} · Published {fmtDate(p.publishedAt)}
-                          {p.fileData?" · 📎 File":""}
+                        <div style={{display:"flex",gap:6,alignItems:"center",flexShrink:0,marginLeft:8}}>
+                          <Tag color={T.green} style={{fontSize:10}}>v{p.version}</Tag>
+                          <Tag color={T.purple} style={{fontSize:10}}>Published</Tag>
                         </div>
                       </div>
-                      <Tag color={T.green} style={{fontSize:10,flexShrink:0,marginLeft:8}}>Published</Tag>
                     </div>
-                  </div>
-                ))}
+                  );
+                })}
               </div>
             </div>
           )}
+
         </div>
       )}
     </div>
@@ -7787,20 +7994,37 @@ const GenerationPanel = ({ outcomes, refs, compound, project, projectId, onBack,
         const reader = new FileReader();
         reader.onload = () => {
           try {
+            const htmlContent = buildPaperHtml(project, compound, outcomes, refs);
             const paperEntry = {
               id: crypto.randomUUID(),
+              groupId: crypto.randomUUID(),
               title: project?.paper_title||(compound?.name||"")+" Evidence Synthesis",
-              compound: compound?.name||"", version:"1.0",
-              status:"in_progress", updatedAt:Date.now(), createdAt:Date.now(),
-              fileName:name, fileData:reader.result, fileSize:b.size,
-              notes:"Generated "+new Date().toLocaleDateString("en-GB",{day:"2-digit",month:"short",year:"numeric",hour:"2-digit",minute:"2-digit"}),
-              team:project?.team||[], affiliation:project?.affiliation||"", journal:project?.journal||"",
-              history:[{date:Date.now(),action:"Generated",fileName:name}],
+              compound: compound?.name||"",
+              status: "draft",
+              version: null,
+              nextVersion: 1,
+              basedOnVersion: null,
+              htmlContent,
+              updatedAt: Date.now(), createdAt: Date.now(),
+              fileName: name, fileData: reader.result, fileSize: b.size,
+              notes: "Generated "+new Date().toLocaleDateString("en-GB",{day:"2-digit",month:"short",year:"numeric",hour:"2-digit",minute:"2-digit"}),
+              team: project?.team||[], affiliation: project?.affiliation||"", journal: project?.journal||"",
+              history: [{date:Date.now(),action:"Generated",fileName:name}],
             };
-            setPapers(prev=>{
-              const existing=prev.findIndex(p=>p.compound===paperEntry.compound&&p.status!=="published");
-              if(existing>=0){const next=[...prev];next[existing]={...prev[existing],...paperEntry};return next;}
-              return [...prev,paperEntry];
+            setPapers(prev => {
+              const existingIdx = prev.findIndex(p => p.compound === paperEntry.compound && p.status !== "published");
+              if (existingIdx >= 0) {
+                const existing = prev[existingIdx];
+                const next = [...prev];
+                next[existingIdx] = {
+                  ...paperEntry,
+                  id: existing.id,
+                  groupId: existing.groupId || paperEntry.groupId,
+                  nextVersion: existing.nextVersion || 1,
+                };
+                return next;
+              }
+              return [...prev, paperEntry];
             });
           } catch(ex){console.warn("Paper save:",ex);}
         };
@@ -9210,7 +9434,7 @@ const AutoGenBtn = ({label, onClick}) => {
 
 const ValidateGeneratePanel = ({ outcomes, refs, compound, project,
   projectId, onUpdateProject, allPatients=[], activeCompound="",
-  onNavToOverview, onNavToRefs, onNavToResults }) => {
+  onNavToOverview, onNavToRefs, onNavToResults, setPapers }) => {
 
   const [genMode,      setGenMode]      = useState(false);
   const [serverResult, setServerResult] = useState(null);
@@ -9375,7 +9599,8 @@ useEffect(()=>{
 
   if(genMode) return (
     <GenerationPanel outcomes={outcomes} refs={refs} compound={compound}
-      project={project} projectId={projectId} onBack={()=>setGenMode(false)}/>
+      project={project} projectId={projectId} onBack={()=>setGenMode(false)}
+      setPapers={setPapers}/>
   );
 
   // Primary compound details from patient data
@@ -10622,7 +10847,8 @@ const ValidateTab=({outcomes,refs,compound,project,projectId})=>{
       )}
       {genMode
         ?<GenerationPanel outcomes={outcomes} refs={refs} compound={compound}
-            project={project} projectId={projectId} onBack={()=>setGenMode(false)}/>
+            project={project} projectId={projectId} onBack={()=>setGenMode(false)}
+            setPapers={setPapers}/>
         :<ValidationPanel outcomes={outcomes} refs={refs} compound={compound}
             onGenerate={()=>setGenMode(true)}/>}
     </div>
@@ -13391,7 +13617,8 @@ export default function App(){
                     !activeCompound||p.primaryCompound?.name===activeCompound)}
                   onNavToOverview={()=>setCompoundTab("overview")}
                   onNavToRefs={()=>setCompoundTab("refs")}
-                  onNavToResults={()=>setCompoundTab("results")}/>
+                  onNavToResults={()=>setCompoundTab("results")}
+                  setPapers={setPapers}/>
               )}
 
               {activeTab==="evidence"&&project&&(
@@ -13452,7 +13679,8 @@ export default function App(){
                   compound={compound} project={project} projectId={project?.id}
                   activeCompound={activeCompound||compound?.name||compound?.compound_name||""}
                   onUpdateProject={updateProjectFull}
-                  allPatients={allPatients}/>
+                  allPatients={allPatients}
+                  setPapers={setPapers}/>
               )}
 
               {activeTab==="doctors"&&selectedStudy&&(
@@ -13479,25 +13707,48 @@ export default function App(){
                 <div className="fade-in">
                   <PapersPanel
                     papers={papers}
-                    onUpdate={(p)=>{
-                      const updated = papers.map(x=>x.id===p.id?{...p,updatedAt:Date.now()}:x);
-                      savePapers(updated);
+                    onUpdate={(p) => {
+                      savePapers(papers.map(x => x.id === p.id ? { ...p, updatedAt: Date.now() } : x));
                     }}
-                    onPublish={(id)=>{
-                      const updated = papers.map(p=>p.id===id?{...p,status:"published",publishedAt:Date.now(),updatedAt:Date.now()}:p);
-                      savePapers(updated);
+                    onPublish={(id, htmlContent) => {
+                      const orig = papers.find(p => p.id === id);
+                      if (!orig) return;
+                      const publishedVersion = orig.nextVersion || 1;
+                      savePapers(papers.map(p => p.id === id ? {
+                        ...p,
+                        status: "published",
+                        version: publishedVersion,
+                        publishedAt: Date.now(),
+                        updatedAt: Date.now(),
+                        htmlContent: htmlContent || p.htmlContent,
+                        nextVersion: null,
+                        basedOnVersion: null,
+                      } : p));
                     }}
-                    onCreateRevision={(id)=>{
-                      const orig = papers.find(p=>p.id===id);
-                      if(!orig) return;
-                      const rev = {...orig, id:crypto.randomUUID(),
-                        version:(Number(orig.version)+0.1).toFixed(1),
-                        status:"in_progress", publishedAt:null, updatedAt:Date.now(),
-                        title:orig.title+" (Revision)"};
+                    onCreateRevision={(id) => {
+                      const orig = papers.find(p => p.id === id);
+                      if (!orig) return;
+                      const gid = orig.groupId || orig.id;
+                      const maxVer = Math.max(...papers
+                        .filter(p => (p.groupId || p.id) === gid && p.status === "published")
+                        .map(p => p.version || 0), 0);
+                      const nextVer = maxVer + 1;
+                      const rev = {
+                        ...orig,
+                        id: crypto.randomUUID(),
+                        groupId: gid,
+                        status: "draft",
+                        version: null,
+                        publishedAt: null,
+                        basedOnVersion: orig.version,
+                        nextVersion: nextVer,
+                        updatedAt: Date.now(),
+                        notes: "",
+                        history: [{ date: Date.now(), action: `Created revision from v${orig.version}`, fileName: orig.fileName || "" }],
+                      };
                       savePapers([...papers, rev]);
                     }}
-                    onDelete={(id)=>savePapers(papers.filter(p=>p.id!==id))}
-                    compounds={compounds} outcomes={outcomes} refs={refs}/>
+                    onDelete={(id) => savePapers(papers.filter(p => p.id !== id))}/>
                 </div>
               )}
 
