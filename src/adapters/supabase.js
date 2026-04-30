@@ -757,7 +757,7 @@ export const adapter = {
       title: d.title || paper?.title || '',
       compound: d.compound || paper?.compound || '',
       status: 'draft',
-      version: null,
+      version: dynamicNext ?? d.next_version_number ?? 1,
       nextVersion: dynamicNext ?? d.next_version_number,
       basedOnVersion: d.source_version_number || null,
       htmlContent: d.html_content || '',
