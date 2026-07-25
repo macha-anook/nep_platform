@@ -444,32 +444,32 @@ const SaveIndicator=({saving})=>(
 );
 
 /* ─── AUTH SCREEN ────────────────────────────────────────────────────── */
+// Single entry point per method (Google / Email) — new-vs-existing is decided
+// after identity is confirmed (needsRole on the returned user), not upfront.
 const AuthScreen=({onAuth})=>{
-  const [mode,setMode]=useState("signin"); // "signin"|"register"
   const [email,setEmail]=useState("");
-  const [fullName,setFullName]=useState("");
-  const [role,setRole]=useState("doctor");
   const [otpStep,setOtpStep]=useState(null); // null|"sent"
   const [otpDigits,setOtpDigits]=useState(["","","","","",""]);
   const [loading,setLoading]=useState(false);
   const [error,setError]=useState("");
   const otpRefs=useRef([null,null,null,null,null,null]);
   const [focusedIdx,setFocusedIdx]=useState(null);
+  const [googleLoading,setGoogleLoading]=useState(false);
 
   const isDoctorUrl=!!new URLSearchParams(window.location.search).get("study");
   const otpCode=otpDigits.join("");
 
-  const switchMode=(m)=>{
-    setMode(m);setError("");setOtpStep(null);setOtpDigits(["","","","","",""]);setEmail("");setFullName("");setRole("doctor");
+  const signInWithGoogle=async()=>{
+    setGoogleLoading(true);setError("");
+    try{ await API.signInWithGoogle(); }
+    catch(e){ setError(e.message||"Google sign-in failed. Please try again."); setGoogleLoading(false); }
   };
 
-  const canSend=email&&(mode==="signin"||fullName.trim().length>=2);
-
   const sendOtp=async()=>{
-    if(!canSend){setError(mode==="register"?"Enter your name and email.":"Enter your email first.");return;}
+    if(!email){setError("Enter your email first.");return;}
     setLoading(true);setError("");
     try{
-      await API.sendOtp(email,mode==="register"?fullName.trim():undefined,mode==="register"?role:undefined);
+      await API.sendOtp(email);
       setOtpStep("sent");
     }catch(e){setError(e.message||"Failed to send code. Please try again.");}
     finally{setLoading(false);}
@@ -478,9 +478,10 @@ const AuthScreen=({onAuth})=>{
   const doVerify=async(code)=>{
     setLoading(true);setError("");
     try{
-      const user=await API.verifyOtp(email, code, mode==="register" ? role : undefined);
+      const user=await API.verifyOtp(email, code);
       if(isDoctorUrl){
         user.role="doctor";
+        user.needsRole=false;
         if(typeof API.markDoctorAuthenticated==="function") API.markDoctorAuthenticated(email, urlInviteToken||null).catch(()=>{});
       }
       onAuth(user);
@@ -524,6 +525,26 @@ const AuthScreen=({onAuth})=>{
   const btnFull={width:"100%",padding:"13px",fontSize:14,fontWeight:700};
   const linkBtn={background:"none",border:"none",color:T.teal,cursor:"pointer",
     fontFamily:"inherit",fontSize:13,fontWeight:600,padding:0};
+
+  const GoogleAuthBlock=(
+    <>
+      <div style={{display:"flex",alignItems:"center",gap:12,margin:"20px 0"}}>
+        <div style={{flex:1,height:1,background:T.border}}/>
+        <span style={{fontSize:11,color:T.text3,fontWeight:600}}>OR</span>
+        <div style={{flex:1,height:1,background:T.border}}/>
+      </div>
+      <Btn variant="secondary" onClick={signInWithGoogle} disabled={loading||googleLoading}
+        style={{...btnFull,justifyContent:"center",background:T.bg3}}>
+        <svg width="16" height="16" viewBox="0 0 18 18" aria-hidden="true">
+          <path fill="#4285F4" d="M17.64 9.2c0-.64-.06-1.25-.16-1.84H9v3.48h4.84a4.14 4.14 0 0 1-1.8 2.72v2.26h2.9c1.7-1.57 2.7-3.88 2.7-6.62z"/>
+          <path fill="#34A853" d="M9 18c2.43 0 4.47-.8 5.96-2.18l-2.9-2.26c-.8.54-1.84.86-3.06.86-2.35 0-4.34-1.59-5.05-3.72H.98v2.33A9 9 0 0 0 9 18z"/>
+          <path fill="#FBBC05" d="M3.95 10.7A5.4 5.4 0 0 1 3.67 9c0-.59.1-1.17.28-1.7V4.97H.98A9 9 0 0 0 0 9c0 1.45.35 2.83.98 4.03l2.97-2.33z"/>
+          <path fill="#EA4335" d="M9 3.58c1.32 0 2.5.45 3.44 1.35l2.58-2.58C13.46.89 11.43 0 9 0A9 9 0 0 0 .98 4.97l2.97 2.33C4.66 5.17 6.65 3.58 9 3.58z"/>
+        </svg>
+        {googleLoading?"Redirecting…":"Continue with Google"}
+      </Btn>
+    </>
+  );
 
   return(
     <div style={{minHeight:"100vh",background:T.bg0,display:"flex",alignItems:"center",
@@ -577,7 +598,7 @@ const AuthScreen=({onAuth})=>{
             {error&&<div style={{fontSize:12,color:T.red,marginBottom:12,textAlign:"center"}}>{error}</div>}
             <Btn onClick={()=>doVerify(otpCode)} disabled={otpCode.length!==6||loading}
               style={{...btnFull,marginBottom:16}}>
-              {loading?"Verifying…":mode==="register"?"Verify & create account":"Verify & Sign In"}
+              {loading?"Verifying…":"Continue"}
             </Btn>
             <div style={{textAlign:"center"}}>
               <button onClick={sendOtp} disabled={loading}
@@ -586,66 +607,106 @@ const AuthScreen=({onAuth})=>{
               </button>
             </div>
           </div>
-        ):mode==="register"?(
-          /* ── Register Step ── */
-          <div style={cardStyle}>
-            <h2 style={{fontSize:20,fontWeight:700,color:T.text0,marginBottom:4,marginTop:0}}>Create Account</h2>
-            <p style={{fontSize:13,color:T.text2,marginBottom:24,marginTop:0}}>
-              A one-time code will be sent to your email
-            </p>
-            <div style={{marginBottom:14}}>
-              <FieldLabel label="Full Name" required/>
-              <input value={fullName} onChange={e=>setFullName(e.target.value)}
-                placeholder="Dr. Jane Smith" autoFocus/>
-            </div>
-            <div style={{marginBottom:14}}>
-              <FieldLabel label="Email" required/>
-              <input value={email} onChange={e=>setEmail(e.target.value)}
-                placeholder="you@org.com" type="email"
-                onKeyDown={e=>e.key==="Enter"&&canSend&&sendOtp()}/>
-            </div>
-            <div style={{marginBottom:20}}>
-              <FieldLabel label="Role"/>
-              <Select value={role} onChange={setRole} options={["doctor","researcher"]}/>
-            </div>
-            {error&&<div style={{fontSize:12,color:T.red,marginBottom:12}}>{error}</div>}
-            <Btn onClick={sendOtp} disabled={loading||!canSend}
-              style={{...btnFull,marginBottom:16}}>
-              {loading?"Sending…":"Send OTP"}
-            </Btn>
-            <p style={{textAlign:"center",fontSize:13,color:T.text2,margin:0}}>
-              Already have an account?{" "}
-              <button onClick={()=>switchMode("signin")} style={linkBtn}>Sign In</button>
-            </p>
-          </div>
         ):(
-          /* ── Sign In Step ── */
+          /* ── Welcome Step ── */
           <div style={cardStyle}>
             <h2 style={{fontSize:20,fontWeight:700,color:T.text0,marginBottom:4,marginTop:0}}>
-              {isDoctorUrl?"Doctor Sign In":"Sign In"}
+              {isDoctorUrl?"Doctor Sign In":"Welcome"}
             </h2>
-            <p style={{fontSize:13,color:T.text2,marginBottom:24,marginTop:0}}>
-              We'll send a one-time code to your email
-            </p>
-            <div style={{marginBottom:20}}>
+            <div style={{marginTop:20,marginBottom:20}}>
               <FieldLabel label="Email" required/>
               <input value={email} onChange={e=>setEmail(e.target.value)}
                 placeholder="you@organisation.com" type="email" autoFocus
                 onKeyDown={e=>e.key==="Enter"&&email&&sendOtp()}/>
             </div>
-            {error&&<div style={{fontSize:12,color:T.red,marginBottom:12}}>{error}</div>}
+            {error&&<div style={{fontSize:12,color:T.red,marginBottom:16}}>{error}</div>}
             <Btn onClick={sendOtp} disabled={loading||!email}
-              style={{...btnFull,marginBottom:16}}>
-              {loading?"Sending…":"Send OTP"}
+              style={{...btnFull}}>
+              {loading?"Sending…":"Continue with Email"}
             </Btn>
-            {!isDoctorUrl&&(
-              <p style={{textAlign:"center",fontSize:13,color:T.text2,margin:0}}>
-                Don't have an account?{" "}
-                <button onClick={()=>switchMode("register")} style={linkBtn}>Register</button>
-              </p>
-            )}
+            {GoogleAuthBlock}
           </div>
         )}
+      </div>
+    </div>
+  );
+};
+
+/* ─── ROLE SETUP (first-time Google sign-in has no register step) ──────── */
+const RoleSetupScreen=({user,onDone})=>{
+  const [role,setRole]=useState("researcher");
+  // Email sign-ups land here with a fallback name (email prefix, from the DB
+  // trigger); Google sign-ups already have a real one — let either be edited.
+  const [fullName,setFullName]=useState(user.name||"");
+  const [saving,setSaving]=useState(false);
+  const [error,setError]=useState("");
+
+  const cardStyle={background:T.bg2,border:`1px solid ${T.border}`,borderRadius:14,
+    padding:"28px",boxShadow:"0 24px 80px rgba(0,0,0,0.5)"};
+
+  const confirm=async()=>{
+    if(!fullName.trim()){setError("Enter your name.");return;}
+    setSaving(true);setError("");
+    try{ await API.completeProfile({role,fullName}); onDone({role,name:fullName.trim()}); }
+    catch(e){ setError(e.message||"Could not save your details. Please try again."); setSaving(false); }
+  };
+
+  const options=[
+    ["researcher","Researcher","Build evidence dossiers, score outcomes, generate manuscripts"],
+    ["doctor","Doctor","Enrol patients and log weekly progress for a clinical study"],
+  ];
+
+  return(
+    <div style={{minHeight:"100vh",background:T.bg0,display:"flex",alignItems:"center",
+      justifyContent:"center",padding:"24px"}}>
+      <div style={{width:"100%",maxWidth:420}}>
+        <div style={{display:"flex",flexDirection:"column",alignItems:"center",marginBottom:32}}>
+          {user.avatarUrl?(
+            <img src={user.avatarUrl} alt="" referrerPolicy="no-referrer"
+              style={{width:52,height:52,borderRadius:12,marginBottom:10,
+                border:"1px solid rgba(0,212,170,0.4)",objectFit:"cover"}}/>
+          ):(
+            <div style={{width:52,height:52,borderRadius:12,background:T.tealBg2,
+              border:`1px solid rgba(0,212,170,0.4)`,display:"flex",alignItems:"center",
+              justifyContent:"center",marginBottom:10}}>
+              <span style={{fontSize:28,fontWeight:800,color:T.teal,fontFamily:T.mono}}>N</span>
+            </div>
+          )}
+          <div style={{fontSize:18,fontWeight:700,color:T.text0}}>Welcome to NEP Platform</div>
+          <div style={{fontSize:12,color:T.text2}}>One last step to set up your account</div>
+        </div>
+        <div style={cardStyle}>
+          <div style={{marginBottom:18}}>
+            <FieldLabel label="Email"/>
+            <input value={user.email||""} disabled
+              style={{opacity:0.65,cursor:"not-allowed"}}/>
+          </div>
+          <div style={{marginBottom:18}}>
+            <FieldLabel label="Full Name" required/>
+            <input value={fullName} onChange={e=>setFullName(e.target.value)}
+              placeholder="Dr. Jane Smith" autoFocus disabled={saving}/>
+          </div>
+          <h2 style={{fontSize:20,fontWeight:700,color:T.text0,marginBottom:4,marginTop:0}}>I am a…</h2>
+          <p style={{fontSize:13,color:T.text2,marginBottom:20,marginTop:0}}>
+            This determines what you'll see in NEP Platform.
+          </p>
+          <div style={{display:"flex",flexDirection:"column",gap:10,marginBottom:20}}>
+            {options.map(([val,label,desc])=>(
+              <button key={val} onClick={()=>setRole(val)} disabled={saving}
+                style={{textAlign:"left",padding:"14px 16px",borderRadius:10,cursor:"pointer",
+                  border:`2px solid ${role===val?T.teal:T.border}`,
+                  background:role===val?T.tealBg2:T.bg3,color:T.text0,fontFamily:"inherit"}}>
+                <div style={{fontSize:14,fontWeight:700,marginBottom:2}}>{label}</div>
+                <div style={{fontSize:12,color:T.text2}}>{desc}</div>
+              </button>
+            ))}
+          </div>
+          {error&&<div style={{fontSize:12,color:T.red,marginBottom:12}}>{error}</div>}
+          <Btn onClick={confirm} disabled={saving}
+            style={{width:"100%",padding:"13px",fontSize:14,fontWeight:700}}>
+            {saving?"Saving…":"Continue"}
+          </Btn>
+        </div>
       </div>
     </div>
   );
@@ -12682,20 +12743,66 @@ export default function App(){
   const toast  = useToast();
   const saveTimer = useRef(null);
 
-  /* Async session init on mount */
-  useEffect(()=>{
-    API.getCurrentUser().then(u=>{
+  /* Single funnel both auth methods land in: resolve whoever is authenticated
+     right now, decide existing-vs-new (needsRole), route accordingly. Email
+     OTP calls this indirectly via onAuth() below with a user it already has;
+     Google has no such callback (full-page redirect), so it must be driven
+     by onAuthStateChange's SIGNED_IN event instead — see note below. */
+  const resolveSession=useCallback(async(opts={})=>{
+    try{
+      const u=await API.getCurrentUser();
       if(u){
-        if(urlStudyId) u.role="doctor";
+        if(urlStudyId){
+          // Invite links are explicit about role — skip the role-picker entirely.
+          u.role="doctor";
+          u.needsRole=false;
+          if(typeof API.markDoctorAuthenticated==="function") API.markDoctorAuthenticated(u.email, urlInviteToken||null).catch(()=>{});
+        }
         setUser(u);
+        setAuthLoading(false);
+        // Strip the one-time OAuth code/token from the URL (whichever call —
+        // the initial mount or the later SIGNED_IN retry — actually caught the
+        // resolved session) so a page refresh doesn't try to re-exchange an
+        // already-used code.
+        if(/[?&](code|error)=/.test(window.location.search) || /access_token=|error=/.test(window.location.hash)){
+          const url=new URL(window.location.href);
+          ["code","error","error_description","state"].forEach(k=>url.searchParams.delete(k));
+          url.hash="";
+          window.history.replaceState({},"",url.pathname+url.search);
+        }
+      } else if(!opts.awaitingRedirect){
+        // No session, and we're not mid-OAuth-callback — genuinely logged out.
+        setUser(null);
+        setAuthLoading(false);
       }
-      setAuthLoading(false);
-    }).catch(()=>setAuthLoading(false));
-    const sub = API.onAuthStateChange((event, session)=>{
-      if(event==="SIGNED_OUT" || !session) setUser(null);
-    });
-    return ()=>sub?.unsubscribe?.();
+      // else: a Google redirect is still resolving in the background (see
+      // below) — keep the loading state as-is instead of flashing the
+      // Welcome screen; the SIGNED_IN event (or the fail-safe) settles it.
+    } catch(e){
+      if(!opts.awaitingRedirect){ setUser(null); setAuthLoading(false); }
+    }
   },[]);
+
+  useEffect(()=>{
+    // Google appends ?code=/?error= (or #access_token=/#error=) to the
+    // redirect URL — presence of either means a session may still be in
+    // flight even though the very first getCurrentUser() call sees nothing.
+    const awaitingRedirect = /[?&](code|error)=/.test(window.location.search)
+      || /access_token=|error=/.test(window.location.hash);
+    resolveSession({awaitingRedirect});
+    const sub = API.onAuthStateChange((event, session)=>{
+      if(event==="SIGNED_OUT" || !session){ setUser(null); setAuthLoading(false); return; }
+      // Google's redirect resolves the session asynchronously — sometimes
+      // after the resolveSession() call above already ran and saw nothing.
+      // SIGNED_IN (and a token refresh) are the signal to re-check and route.
+      if(event==="SIGNED_IN" || event==="TOKEN_REFRESHED") resolveSession();
+    });
+    // Fail-safe: never leave the user stuck on a spinner if the callback
+    // never resolves (e.g. a rejected/expired code) — fall back to the
+    // Welcome screen instead of hanging indefinitely.
+    const failSafe = awaitingRedirect ? setTimeout(()=>setAuthLoading(false),6000) : null;
+    return ()=>{ sub?.unsubscribe?.(); if(failSafe) clearTimeout(failSafe); };
+  },[resolveSession]);
 
   /* Load projects */
   const loadProjects=useCallback(async()=>{
@@ -13003,6 +13110,8 @@ export default function App(){
     if(urlStudyId) u.role="doctor";
     setUser(u); // useEffect([user]) handles data loading based on role
   }}/>;
+  if(user.needsRole) return <RoleSetupScreen user={user}
+    onDone={({role,name})=>setUser({...user,role,name,needsRole:false})}/>;
   if(user.role==="doctor") return (
     <DoctorApp user={user} urlStudyId={urlStudyId} onSignOut={async()=>{await API.signOut();setUser(null);window.history.replaceState({},"",window.location.pathname);}}/>
   );
@@ -13136,7 +13245,7 @@ export default function App(){
           </div>
 
           {/* Sign out */}
-          <button onClick={async()=>{await API.signOut();setUser(null);}}
+          <button onClick={async()=>{await API.signOut();setUser(null);window.history.replaceState({},"",window.location.pathname);}}
             style={{margin:"8px 0",padding:"8px 14px",borderRadius:6,
               background:"none",border:`1px solid ${T.border}`,
               color:T.text3,fontSize:12,cursor:"pointer",

@@ -120,6 +120,25 @@ STATUS: `[ ]` open · `[x]` fixed · `[~]` partial · `[!]` blocker
 
 ## ✅ Fixed
 
+- [x] **OTP sign-in for a brand-new email skipped Registration** — the
+  `handle_new_user` trigger (migrations 005–009) defaulted every new
+  `public.users` row to `role='researcher'`, so the frontend's new-vs-existing
+  check (`role not in ('doctor','researcher')`) could never detect a genuinely
+  new signup and logged them straight in instead of routing to Registration.
+  Fixed: migration `011_new_users_no_default_role.sql` leaves `role` NULL for
+  brand-new signups; `completeProfile()` sets it once Registration completes.
+  Files: `supabase/migrations/011_new_users_no_default_role.sql`,
+  `src/adapters/supabase.js` (`needsRoleFor`).
+
+- [x] **Google sign-in sometimes bounced back to the Sign In screen** —
+  `getCurrentUser()` treated a profile row that hadn't propagated yet (a race
+  right after the OAuth redirect, before PostgREST saw the trigger's insert)
+  as evidence the user had been deleted, and force-signed them out. Fixed:
+  `getCurrentUser()` now retries the profile lookup like `verifyOtp()` already
+  did before giving up. Also stripped the one-time `?code=`/`#access_token=`
+  params from the URL after a successful resolve so a refresh can't retry an
+  already-used code. File: `src/adapters/supabase.js`, `src/App.jsx`.
+
 - [x] **ValidateTab hooks error** — `useState` called inside IIFE in render.
   Fixed: extracted as proper `ValidateTab` component.
 
