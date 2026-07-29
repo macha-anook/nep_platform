@@ -611,7 +611,7 @@ const AuthScreen=({onAuth})=>{
           /* ── Welcome Step ── */
           <div style={cardStyle}>
             <h2 style={{fontSize:20,fontWeight:700,color:T.text0,marginBottom:4,marginTop:0}}>
-              {isDoctorUrl?"Doctor Sign In":"Welcome"}
+              {isDoctorUrl?"Practitioner Sign In":"Welcome"}
             </h2>
             <div style={{marginTop:20,marginBottom:20}}>
               <FieldLabel label="Email" required/>
@@ -653,7 +653,7 @@ const RoleSetupScreen=({user,onDone})=>{
 
   const options=[
     ["researcher","Researcher","Build evidence dossiers, score outcomes, generate manuscripts"],
-    ["doctor","Doctor","Enrol patients and log weekly progress for a clinical study"],
+    ["doctor","Practitioner","Enrol patients and log weekly progress for a clinical study"],
   ];
 
   return(
@@ -2420,7 +2420,7 @@ const StudySummaryPanel = ({ project, outcomes, patients=[], onImport, onGoToFee
     <div className="fade-in">
       <SectionHeader
         title={project?.name||"Study"}
-        subtitle={`${patients.length} patients from ${[...new Set(patients.map(p=>p.doctorName).filter(Boolean))].length} doctor(s) · Primary compound: ${compound}`}/>
+        subtitle={`${patients.length} patients from ${[...new Set(patients.map(p=>p.doctorName).filter(Boolean))].length} practitioner(s) · Primary compound: ${compound}`}/>
 
       {/* Stats row */}
       <div style={{display:"flex",gap:12,marginBottom:20,flexWrap:"wrap"}}>
@@ -2562,7 +2562,7 @@ const PatientFeedPanel = ({ patients=[], outcomes, onImport }) => {
     <div className="fade-in">
       <SectionHeader
         title="Patient Feed"
-        subtitle="All doctor submissions for this study compound"
+        subtitle="All practitioner submissions for this study compound"
         action={
           <Btn onClick={onImport} style={{fontSize:12}}>
             ↓ Import to Evidence
@@ -2593,7 +2593,7 @@ const PatientFeedPanel = ({ patients=[], outcomes, onImport }) => {
           border:`1px dashed ${T.border2}`,borderRadius:8}}>
           <div style={{fontSize:32,marginBottom:8,opacity:0.3}}>👤</div>
           <p style={{fontSize:13,color:T.text3}}>
-            No patient data yet. Doctors need to log patients on the mobile app.
+            No patient data yet. Practitioners need to log patients on the mobile app.
           </p>
         </div>
       )}
@@ -3027,7 +3027,7 @@ const StudyDetailView = ({
         <div style={{padding:"14px 20px",borderBottom:`1px solid ${T.border}`,
           display:"flex",justifyContent:"space-between",alignItems:"center"}}>
           <div style={{fontSize:13,fontWeight:700,color:"#F0F6FF"}}>
-            Contributing Doctors ({doctors.length})
+            Contributing Practitioners ({doctors.length})
           </div>
           <div style={{display:"flex",gap:8}}>
             <button onClick={()=>{
@@ -3049,7 +3049,7 @@ const StudyDetailView = ({
 
         {doctors.length===0&&(
           <div style={{padding:"40px 20px",textAlign:"center",color:T.text3,fontSize:13}}>
-            No patient data yet. Doctors need to log patients on the mobile app.
+            No patient data yet. Practitioners need to log patients on the mobile app.
           </div>
         )}
 
@@ -3697,7 +3697,7 @@ const ComputedResultsPanel = ({ patients=[], outcomes=[], compound="", onNext })
       <div style={{fontSize:40,opacity:0.2,marginBottom:12}}>📊</div>
       <p style={{color:T.text3,fontSize:14}}>No completed cases yet.</p>
       <p style={{color:T.text3,fontSize:12,marginTop:6}}>
-        Completed cases will appear here once doctors close patient records.
+        Completed cases will appear here once practitioners close patient records.
       </p>
     </div>
   );
@@ -3773,7 +3773,7 @@ const ComputedResultsPanel = ({ patients=[], outcomes=[], compound="", onNext })
             borderRadius:6,fontSize:11,color:T.text3,lineHeight:1.6}}>
             <strong style={{color:"#F0F6FF"}}>ESS</strong> = Mean WS across all outcome rows.
             ESS ≥12 = Very Strong · ≥9 = Strong · ≥6 = Moderate · &lt;6 = Weak.
-            O score is <strong style={{color:T.teal}}>auto-computed</strong> from doctor-recorded
+            O score is <strong style={{color:T.teal}}>auto-computed</strong> from practitioner-recorded
             direction, statistical significance and MCID data.
           </div>
         </div>
@@ -4199,7 +4199,7 @@ const ComputedResultsPanel = ({ patients=[], outcomes=[], compound="", onNext })
               borderRadius:6,fontSize:11,color:T.text3,lineHeight:1.6}}>
               <strong style={{color:"#F0F6FF"}}>Interpretation:</strong> A higher improvement
               rate vs baseline suggests a potential additive effect. This is observational —
-              confounding factors (patient selection, doctor preference) cannot be excluded.
+              confounding factors (patient selection, practitioner preference) cannot be excluded.
               Include in Discussion with appropriate caveats.
             </div>
           </div>
@@ -4686,13 +4686,13 @@ const StudiesListPanel = ({
   if (!patients.length) return (
     <div className="fade-in">
       <SectionHeader title="My Studies"
-        subtitle="Waiting for doctor patient data"/>
+        subtitle="Waiting for practitioner patient data"/>
       <div style={{textAlign:"center",padding:"80px",
         border:`1px dashed ${T.border2}`,borderRadius:10}}>
         <div style={{fontSize:48,marginBottom:12,opacity:0.2}}>🔬</div>
         <p style={{fontSize:14,color:T.text3}}>No patient data yet.</p>
         <p style={{fontSize:12,color:T.text3,marginTop:6}}>
-          Doctors need to log patients on the mobile app first.
+          Practitioners need to log patients on the mobile app first.
         </p>
       </div>
     </div>
@@ -4738,7 +4738,7 @@ const StudiesListPanel = ({
           </div>
           <span style={{fontSize:10,color:T.text3,
             background:T.bg3,padding:"2px 8px",borderRadius:4}}>
-            Read-only · sourced from doctor prescriptions
+            Read-only · sourced from practitioner prescriptions
           </span>
         </div>
         <div style={{display:"grid",gridTemplateColumns:"repeat(3,1fr)",
@@ -4883,7 +4883,7 @@ const StudiesListPanel = ({
         <div style={{padding:"14px 20px",borderBottom:`1px solid ${T.border}`,
           display:"flex",justifyContent:"space-between",alignItems:"center"}}>
           <div style={{fontSize:14,fontWeight:700,color:"#F0F6FF"}}>
-            Contributing Doctors ({doctors.length})
+            Contributing Practitioners ({doctors.length})
           </div>
           <div style={{display:"flex",gap:12}}>
             <button onClick={()=>{
@@ -6916,7 +6916,7 @@ const downloadBlob = (blob, filename) => {
 
 /* ─── STUDY MANAGEMENT ──────────────────────────────────────────────── */
 const STUDY_STATUSES = ["recruiting","collecting","analysis","draft","published"];
-const STUDY_STATUS_LABELS = {recruiting:"Recruiting doctors",collecting:"Data collection",analysis:"Analysis",draft:"Paper draft",published:"Published"};
+const STUDY_STATUS_LABELS = {recruiting:"Recruiting practitioners",collecting:"Data collection",analysis:"Analysis",draft:"Paper draft",published:"Published"};
 const STUDY_STATUS_COLORS = {recruiting:"#6366F1",collecting:T.amber,analysis:T.teal,draft:"#A78BFA",published:T.green};
 
 const CreateStudyModal = ({ compounds, onClose, onCreate }) => {
@@ -6946,7 +6946,7 @@ const CreateStudyModal = ({ compounds, onClose, onCreate }) => {
         maxHeight:"90vh",overflow:"auto",border:`1px solid ${T.teal}40`}}>
         <div style={{padding:20,borderBottom:`1px solid ${T.border}`}}>
           <div style={{fontSize:16,fontWeight:700,color:"#F0F6FF"}}>Create new study</div>
-          <div style={{fontSize:11,color:T.text3,marginTop:4}}>Set up a study, select compound, invite doctors</div>
+          <div style={{fontSize:11,color:T.text3,marginTop:4}}>Set up a study, select compound, invite practitioners</div>
         </div>
         <div style={{padding:20,display:"flex",flexDirection:"column",gap:14}}>
           {/* Study title */}
@@ -7013,21 +7013,21 @@ const CreateStudyModal = ({ compounds, onClose, onCreate }) => {
           {/* Invite doctors */}
           <div>
             <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:8}}>
-              <FieldLabel label="Invite doctors" required/>
+              <FieldLabel label="Invite practitioners" required/>
               <button onClick={addDoctor}
                 style={{fontSize:11,color:T.teal,background:"none",border:`1px solid ${T.teal}40`,
                   borderRadius:4,padding:"3px 10px",cursor:"pointer",fontFamily:"inherit"}}>
-                + Add doctor
+                + Add practitioner
               </button>
             </div>
             {form.invitedDoctors.map((d,i)=>(
               <div key={i} style={{display:"grid",gridTemplateColumns:"1fr 1fr 28px",gap:8,marginBottom:6}}>
                 <input value={d.name} onChange={e=>updDoctor(i,"name",e.target.value)}
-                  placeholder="Doctor name"
+                  placeholder="Practitioner name"
                   style={{padding:"9px 10px",borderRadius:6,background:T.bg3,
                     border:`1px solid ${T.border2}`,color:"#F0F6FF",fontSize:12,fontFamily:"inherit"}}/>
                 <input value={d.email} onChange={e=>updDoctor(i,"email",e.target.value)}
-                  placeholder="doctor@email.com" type="email"
+                  placeholder="practitioner@email.com" type="email"
                   style={{padding:"9px 10px",borderRadius:6,background:T.bg3,
                     border:`1px solid ${T.border2}`,color:"#F0F6FF",fontSize:12,fontFamily:"inherit"}}/>
                 {i>0?(
@@ -7037,7 +7037,7 @@ const CreateStudyModal = ({ compounds, onClose, onCreate }) => {
               </div>
             ))}
             <div style={{fontSize:10,color:T.text3,marginTop:4}}>
-              Each doctor will receive an email with the study link and OTP sign-in instructions.
+              Each practitioner will receive an email with the study link and OTP sign-in instructions.
             </div>
           </div>
         </div>
@@ -7195,7 +7195,7 @@ const DoctorPagesPanel = ({ study, allPatients, onBack, onPatientsChange }) => {
       <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:16}}>
         <button onClick={onBack} style={{background:"none",border:"none",color:T.teal,
           cursor:"pointer",fontSize:13,fontFamily:"inherit"}}>← Back to studies</button>
-        <div style={{fontSize:14,fontWeight:600,color:"#F0F6FF"}}>{study?.title||"Study"} — Doctor pages</div>
+        <div style={{fontSize:14,fontWeight:600,color:"#F0F6FF"}}>{study?.title||"Study"} — Practitioner pages</div>
       </div>
 
       {/* Doctor tabs */}
@@ -7216,7 +7216,7 @@ const DoctorPagesPanel = ({ study, allPatients, onBack, onPatientsChange }) => {
       <div style={{background:T.bg2,borderRadius:10,padding:16,border:`1px solid ${T.border}`,marginBottom:16}}>
         <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
           <div>
-            <div style={{fontSize:15,fontWeight:600,color:"#F0F6FF"}}>{doctor?.name||"Doctor"}</div>
+            <div style={{fontSize:15,fontWeight:600,color:"#F0F6FF"}}>{doctor?.name||"Practitioner"}</div>
             <div style={{fontSize:11,color:T.text3}}>{doctor?.email} · {compound?.name||"—"}</div>
           </div>
           <Tag color={doctor?.authenticated?T.green:"#5A7A9A"}>
@@ -7507,8 +7507,10 @@ const DoctorPagesPanel = ({ study, allPatients, onBack, onPatientsChange }) => {
 /* ─── PAPERS PANEL ──────────────────────────────────────────────────── */
 const PAPER_SECTIONS = ["Abstract","Introduction","Methods","Results","Discussion","Conclusion","References"];
 
-const PapersPanel = ({ papers, onUpdate, onPublish, onCreateRevision, onDelete }) => {
+const PapersPanel = ({ papers, onUpdate, onPublish, onCreateRevision, onDelete,
+  referencePapers=[], onUploadReference, onDeleteReference, canUploadReference=true }) => {
   const [viewingId, setViewingId] = useState(null);
+  const [innerTab, setInnerTab] = useState("project");
   const fileInputRef = useRef(null);
   const paper = papers.find(p=>p.id===viewingId);
   const inProgress = papers.filter(p=>p.status!=="published").sort((a,b)=>(b.updatedAt||0)-(a.updatedAt||0));
@@ -7704,9 +7706,28 @@ const PapersPanel = ({ papers, onUpdate, onPublish, onCreateRevision, onDelete }
   return (
     <div className="fade-in">
       <SectionHeader title="Papers"
-        subtitle={`${papers.length} paper(s) · ${published.length} published · ${inProgress.length} in progress`}/>
+        subtitle={innerTab==="project"
+          ?`${papers.length} paper(s) · ${published.length} published · ${inProgress.length} in progress`
+          :`${referencePapers.length} reference paper(s)`}/>
 
-      {papers.length===0?(
+      <div style={{display:"flex",gap:8,marginTop:14,marginBottom:6}}>
+        {[["project","This Project"],["reference","Reference Library"]].map(([id,label])=>(
+          <button key={id} onClick={()=>setInnerTab(id)}
+            style={{fontSize:12,padding:"7px 16px",borderRadius:7,cursor:"pointer",fontFamily:"inherit",
+              fontWeight:innerTab===id?700:400,
+              background:innerTab===id?T.teal:"transparent",
+              color:innerTab===id?T.bg0:"#F0F6FF",
+              border:`1px solid ${innerTab===id?T.teal:T.border}`}}>
+            {label}
+          </button>
+        ))}
+      </div>
+
+      {innerTab==="reference"?(
+        <ReferencePapersLibrary referencePapers={referencePapers}
+          onUpload={onUploadReference} onDelete={onDeleteReference}
+          canUpload={canUploadReference} canDelete={canUploadReference}/>
+      ):papers.length===0?(
         <div style={{textAlign:"center",padding:"60px 20px",
           border:`1px dashed ${T.border2}`,borderRadius:8,marginTop:16}}>
           <div style={{fontSize:32,marginBottom:12,opacity:0.3}}>📄</div>
@@ -7791,8 +7812,242 @@ const PapersPanel = ({ papers, onUpdate, onPublish, onCreateRevision, onDelete }
   );
 };
 
+/* ─── MEDICINE EFFECTIVENESS ─────────────────────────────────────────── */
+// Plain average of the practitioner-submitted rating (1-10) per medicine.
+// Backed by a security-definer RPC — raw patient feedback reports never
+// reach this component or the researcher role.
+const MedicineEffectivenessPanel = ({ effectiveness }) => {
+  const sorted = [...effectiveness].sort((a,b)=>(b.avg_rating||0)-(a.avg_rating||0));
+  return (
+    <div className="fade-in">
+      <SectionHeader title="Medicine Effectiveness"
+        subtitle={`${sorted.length} medicine(s) with practitioner feedback`}/>
+      {sorted.length===0?(
+        <div style={{textAlign:"center",padding:"60px 20px",
+          border:`1px dashed ${T.border2}`,borderRadius:8,marginTop:16}}>
+          <div style={{fontSize:32,marginBottom:12,opacity:0.3}}>💊</div>
+          <p style={{fontSize:13,color:T.text3}}>No patient feedback reports yet.</p>
+        </div>
+      ):(
+        <div style={{marginTop:16,display:"flex",flexDirection:"column",gap:8}}>
+          {sorted.map(m=>(
+            <div key={m.medicine} style={{background:T.bg2,borderRadius:10,padding:14,
+              border:`1px solid ${T.border}`,display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+              <div>
+                <div style={{fontSize:13,fontWeight:600,color:"#F0F6FF"}}>{m.medicine}</div>
+                <div style={{fontSize:11,color:T.text3}}>{m.report_count} report(s)</div>
+              </div>
+              <div style={{fontSize:20,fontWeight:700,color:T.teal}}>
+                {Number(m.avg_rating).toFixed(2)}
+                <span style={{fontSize:11,color:T.text3,fontWeight:400}}>/10</span>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+};
+
+/* ─── REFERENCE PAPERS LIBRARY ───────────────────────────────────────── */
+// Platform-wide papers uploaded by researchers, viewable/downloadable by
+// both roles — decoupled from any project or study.
+const ReferencePapersLibrary = ({ referencePapers, onUpload, onDelete, canUpload, canDelete }) => {
+  const fileInputRef = useRef(null);
+  const [title, setTitle] = useState("");
+  const fmtDate = (ts) => ts ? new Date(ts).toLocaleDateString("en-GB",{day:"2-digit",month:"short",year:"numeric"}) : "—";
+
+  const handleFile = (e) => {
+    const file = e.target.files?.[0];
+    if(!file) return;
+    const reader = new FileReader();
+    reader.onload = (ev) => {
+      onUpload({
+        title: title.trim() || file.name,
+        fileName: file.name,
+        fileSize: file.size,
+        fileType: file.type || "application/pdf",
+        fileData: ev.target.result,
+      });
+      setTitle("");
+    };
+    reader.readAsDataURL(file);
+    e.target.value = "";
+  };
+
+  const download = (p) => {
+    const a = document.createElement("a");
+    a.href = p.file_data || p.fileData;
+    a.download = p.file_name || p.fileName || "paper";
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+  };
+
+  return (
+    <div className="fade-in">
+      {canUpload&&(
+        <div style={{background:T.bg2,borderRadius:10,padding:16,border:`1px solid ${T.border}`,
+          marginBottom:16,display:"flex",gap:10,alignItems:"center"}}>
+          <input value={title} onChange={e=>setTitle(e.target.value)} placeholder="Paper title (optional)"
+            style={{flex:1,padding:"9px 10px",borderRadius:6,background:T.bg3,
+              border:`1px solid ${T.border2}`,color:"#F0F6FF",fontSize:12,fontFamily:"inherit"}}/>
+          <button onClick={()=>fileInputRef.current?.click()}
+            style={{fontSize:12,color:T.teal,background:"none",border:`1px solid ${T.teal}`,
+              borderRadius:6,padding:"8px 16px",cursor:"pointer",fontFamily:"inherit",fontWeight:600,
+              whiteSpace:"nowrap"}}>
+            ↑ Upload paper
+          </button>
+          <input ref={fileInputRef} type="file" accept=".pdf,.doc,.docx" onChange={handleFile} style={{display:"none"}}/>
+        </div>
+      )}
+
+      {referencePapers.length===0?(
+        <div style={{textAlign:"center",padding:"60px 20px",
+          border:`1px dashed ${T.border2}`,borderRadius:8}}>
+          <div style={{fontSize:32,marginBottom:12,opacity:0.3}}>📚</div>
+          <p style={{fontSize:13,color:T.text3}}>No reference papers yet.</p>
+        </div>
+      ):(
+        <div style={{display:"flex",flexDirection:"column",gap:8}}>
+          {referencePapers.map(p=>(
+            <div key={p.id} style={{background:T.bg2,borderRadius:10,padding:14,
+              border:`1px solid ${T.border}`,display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+              <div style={{flex:1,minWidth:0}}>
+                <div style={{fontSize:13,fontWeight:600,color:"#F0F6FF",marginBottom:3,
+                  overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>
+                  {p.title||p.file_name||p.fileName}
+                </div>
+                <div style={{fontSize:11,color:T.text3}}>
+                  {Math.round((p.file_size||p.fileSize||0)/1024)} KB · {fmtDate(p.created_at||p.createdAt)}
+                </div>
+              </div>
+              <div style={{display:"flex",gap:8,alignItems:"center",flexShrink:0,marginLeft:8}}>
+                <button onClick={()=>download(p)}
+                  style={{fontSize:12,color:T.teal,background:"none",border:`1px solid ${T.teal}40`,
+                    borderRadius:6,padding:"6px 14px",cursor:"pointer",fontFamily:"inherit"}}>
+                  ↓ Download
+                </button>
+                {canDelete&&(
+                  <button onClick={()=>{ if(confirm("Delete this paper?")) onDelete(p.id); }}
+                    style={{fontSize:10,color:T.red,background:"none",border:"none",
+                      cursor:"pointer",opacity:0.5}}>✕</button>
+                )}
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+};
 
 
+
+/* ─── PATIENT FEEDBACK REPORTS (practitioner) ────────────────────────── */
+// Platform-wide, practitioner-owned. Effectiveness of a medicine = plain
+// average of `rating` across all reports naming it — see MedicineEffectivenessPanel.
+const FEEDBACK_EMPTY = {complaints:"",medicine:"",feedback6mo:"",rating:"7"};
+const FeedbackReportsPanel = ({ reports, onSave, onDelete }) => {
+  const [form,setForm] = useState(FEEDBACK_EMPTY);
+  const [editingId,setEditingId] = useState(null);
+  const upd = (f,v) => setForm(prev=>({...prev,[f]:v}));
+
+  const startEdit = (r) => {
+    setEditingId(r.id);
+    setForm({complaints:r.complaints||"",medicine:r.medicine||"",
+      feedback6mo:r.feedback_6mo||r.feedback6mo||"",rating:String(r.rating||7)});
+  };
+  const cancelEdit = () => { setEditingId(null); setForm(FEEDBACK_EMPTY); };
+
+  const submit = async () => {
+    if(!form.medicine.trim()) return alert("Medicine administered is required.");
+    await onSave({...(editingId?{id:editingId}:{}), ...form});
+    cancelEdit();
+  };
+
+  return (
+    <div className="fade-in">
+      <SectionHeader title="Patient Feedback Reports"
+        subtitle={`${reports.length} report(s) submitted`}/>
+
+      <div style={{background:T.bg2,borderRadius:10,padding:16,border:`1px solid ${T.border}`,marginTop:16,marginBottom:20}}>
+        <div style={{fontSize:10,color:T.teal,fontWeight:700,textTransform:"uppercase",
+          letterSpacing:"0.06em",marginBottom:10}}>
+          {editingId?"Edit report":"New report"}
+        </div>
+        <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:12,marginBottom:12}}>
+          <div>
+            <FieldLabel label="Medicine administered" required/>
+            <input value={form.medicine} onChange={e=>upd("medicine",e.target.value)}
+              placeholder="e.g. Ashwagandha"
+              style={{width:"100%",padding:"9px 10px",borderRadius:6,background:T.bg3,
+                border:`1px solid ${T.border2}`,color:"#F0F6FF",fontSize:12,fontFamily:"inherit",boxSizing:"border-box"}}/>
+          </div>
+          <div>
+            <FieldLabel label="Effectiveness rating (1-10)" required/>
+            <select value={form.rating} onChange={e=>upd("rating",e.target.value)}
+              style={{width:"100%",padding:"9px 10px",borderRadius:6,background:T.bg3,
+                border:`1px solid ${T.border2}`,color:"#F0F6FF",fontSize:12,fontFamily:"inherit"}}>
+              {Array.from({length:10},(_,i)=>i+1).map(n=>(
+                <option key={n} value={n}>{n}</option>
+              ))}
+            </select>
+          </div>
+        </div>
+        <div style={{marginBottom:12}}>
+          <FieldLabel label="Patient complaints"/>
+          <textarea value={form.complaints} onChange={e=>upd("complaints",e.target.value)}
+            placeholder="What did the patient present with?"
+            style={{width:"100%",minHeight:60,fontSize:12,lineHeight:1.6,color:"#F0F6FF",
+              fontFamily:"inherit",padding:10,borderRadius:6,background:T.bg3,
+              border:`1px solid ${T.border2}`,resize:"vertical",boxSizing:"border-box"}}/>
+        </div>
+        <div style={{marginBottom:14}}>
+          <FieldLabel label="6-month feedback"/>
+          <textarea value={form.feedback6mo} onChange={e=>upd("feedback6mo",e.target.value)}
+            placeholder="How did the patient respond over 6 months?"
+            style={{width:"100%",minHeight:60,fontSize:12,lineHeight:1.6,color:"#F0F6FF",
+              fontFamily:"inherit",padding:10,borderRadius:6,background:T.bg3,
+              border:`1px solid ${T.border2}`,resize:"vertical",boxSizing:"border-box"}}/>
+        </div>
+        <div style={{display:"flex",gap:10,justifyContent:"flex-end"}}>
+          {editingId&&<Btn variant="secondary" onClick={cancelEdit}>Cancel</Btn>}
+          <Btn onClick={submit}>{editingId?"Save changes":"Submit report"}</Btn>
+        </div>
+      </div>
+
+      {reports.length===0?(
+        <div style={{textAlign:"center",padding:"40px 20px",border:`1px dashed ${T.border2}`,borderRadius:8}}>
+          <p style={{fontSize:13,color:T.text3}}>No feedback reports yet.</p>
+        </div>
+      ):(
+        <div style={{display:"flex",flexDirection:"column",gap:8}}>
+          {reports.map(r=>(
+            <div key={r.id} style={{background:T.bg2,borderRadius:10,padding:14,border:`1px solid ${T.border}`}}>
+              <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start"}}>
+                <div style={{flex:1,minWidth:0}}>
+                  <div style={{fontSize:12,color:T.teal,fontFamily:"monospace",marginBottom:2}}>{r.patient_id}</div>
+                  <div style={{fontSize:13,fontWeight:600,color:"#F0F6FF"}}>{r.medicine}</div>
+                  {r.complaints&&<div style={{fontSize:11,color:T.text3,marginTop:2}}>{r.complaints}</div>}
+                </div>
+                <div style={{display:"flex",gap:8,alignItems:"center",flexShrink:0,marginLeft:8}}>
+                  <div style={{fontSize:16,fontWeight:700,color:T.teal}}>
+                    {r.rating}<span style={{fontSize:10,color:T.text3,fontWeight:400}}>/10</span>
+                  </div>
+                  <button onClick={()=>startEdit(r)}
+                    style={{fontSize:11,color:T.text3,background:"none",border:"none",cursor:"pointer"}}>✎</button>
+                  <button onClick={()=>{ if(confirm("Delete this report?")) onDelete(r.id); }}
+                    style={{fontSize:10,color:T.red,background:"none",border:"none",cursor:"pointer",opacity:0.5}}>✕</button>
+                </div>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+};
 
 const GenerationPanel = ({ outcomes, refs, compound, project, projectId, onBack, setPapers }) => {
   const [status, setStatus] = useState("idle"); // idle | running | done | error
@@ -8819,12 +9074,12 @@ const NewProjectModal = ({ onClose, onCreate, existingProjects }) => {
                 </div>
               )}
               <div style={{fontSize:11,color:T.text3,marginTop:4}}>
-                Compound details are automatically sourced from doctor patient data.
+                Compound details are automatically sourced from practitioner patient data.
               </div>
             </div>
             <div style={{padding:"12px 16px",background:T.bg3,borderRadius:8,
               border:`1px solid ${T.border}`,fontSize:12,color:T.text3,lineHeight:1.6}}>
-              💡 After creating the study, you can import doctor patient outcomes,
+              💡 After creating the study, you can import practitioner patient outcomes,
               add references, and generate a full IMRaD paper. Keywords and paper title
               can be auto-generated from your evidence data.
             </div>
@@ -9462,7 +9717,7 @@ useEffect(()=>{
     {cat:"Compound",  label:"Dose range",        val:compDoseRange,    fix:"Auto-sourced from patient data",           nav:"",         required:false},
     {cat:"Compound",  label:"Duration range",    val:compDurRange,     fix:"Auto-sourced from patient data",           nav:"",         required:false},
     {cat:"Compound",  label:"Study notes",       val:notes,            fix:"Study Overview → Study Notes",             nav:"overview", required:false},
-    {cat:"Evidence",  label:"Completed cases",   val:compPatsComplete.length>0?`${compPatsComplete.length} cases`:"", fix:"Doctors must close patient cases", nav:"", required:true},
+    {cat:"Evidence",  label:"Completed cases",   val:compPatsComplete.length>0?`${compPatsComplete.length} cases`:"", fix:"Practitioners must close patient cases", nav:"", required:true},
     {cat:"Evidence",  label:"Outcome rows",      val:(()=>{ const n=outcomes.length||(allPatients||[]).filter(p=>p.status==="complete"&&p.outcome?.outcome1?.direction).length; return n>0?`${n} rows`:""; })(), fix:"Computed Results → Import outcomes", nav:"results", required:true},
     {cat:"Evidence",  label:"ESS computed",      val:ess!=null?`${(Number(ess)||0).toFixed(2)} (${essC})`:"", fix:"Computed Results tab", nav:"results", required:true},
     {cat:"References",label:"References",        val:refs.length>0?`${refs.length} added`:"", fix:"References tab → Search PubMed", nav:"refs", required:false},
@@ -9474,7 +9729,7 @@ useEffect(()=>{
   const optional= fields.filter(f=>!f.val&&!f.required);
 
   const blockers = [
-    ...complete.length===0?["No completed patient cases — doctors need to close cases"]:[] ,
+    ...complete.length===0?["No completed patient cases — practitioners need to close cases"]:[] ,
     ...!titleVal?["Paper title required — auto-generate or type below"]:[] ,
   ];
   const ready = blockers.length===0;
@@ -10716,8 +10971,27 @@ const loadTaxonomy = () => {
 };
 
 
-const DoctorApp = ({ user, onSignOut, urlStudyId="" }) => {
+const DoctorApp = ({ user, onSignOut, urlStudyId="", referencePapers=[], medicineEffectiveness=[] }) => {
   const email = user?.email||"";
+
+  // Global tabs (Studies / Feedback Reports / Papers / Effectiveness) — decoupled
+  // from any specific study, only shown when no study is currently open.
+  const [docView, setDocView] = useState("studies");
+  const [feedbackReports, setFeedbackReports] = useState([]);
+  useEffect(()=>{
+    if(!email) return;
+    API.listFeedbackReports().then(list=>setFeedbackReports(list||[])).catch(()=>setFeedbackReports([]));
+  },[email]);
+  const saveFeedbackReport = async (report) => {
+    const saved = await API.saveFeedbackReport(report);
+    setFeedbackReports(prev=>report.id
+      ? prev.map(r=>r.id===report.id?saved:r)
+      : [saved,...prev]);
+  };
+  const deleteFeedbackReport = async (id) => {
+    await API.deleteFeedbackReport(id);
+    setFeedbackReports(prev=>prev.filter(r=>r.id!==id));
+  };
 
   // Studies this doctor is invited to — loaded from Supabase
   const [studies, setStudies] = useState([]);
@@ -10828,8 +11102,33 @@ const DoctorApp = ({ user, onSignOut, urlStudyId="" }) => {
             Sign out
           </button>
         </div>
-        
+
+        <div style={{display:"flex",gap:8,padding:"14px 20px 0",maxWidth:600,margin:"0 auto"}}>
+          {[["studies","Studies"],["feedback","Feedback Reports"],["papers","Papers"],["effectiveness","Effectiveness"]].map(([id,label])=>(
+            <button key={id} onClick={()=>setDocView(id)}
+              style={{fontSize:12,padding:"7px 14px",borderRadius:7,cursor:"pointer",fontFamily:"inherit",
+                fontWeight:docView===id?700:400,
+                background:docView===id?"#00D2C8":"transparent",
+                color:docView===id?"#0A1628":"#F0F6FF",
+                border:`1px solid ${docView===id?"#00D2C8":"#1A2A3A"}`}}>
+              {label}
+            </button>
+          ))}
+        </div>
+
         <div style={{padding:"24px 20px",maxWidth:600,margin:"0 auto"}}>
+          {docView==="feedback"&&(
+            <FeedbackReportsPanel reports={feedbackReports}
+              onSave={saveFeedbackReport} onDelete={deleteFeedbackReport}/>
+          )}
+          {docView==="papers"&&(
+            <ReferencePapersLibrary referencePapers={referencePapers}
+              canUpload={false} canDelete={false}/>
+          )}
+          {docView==="effectiveness"&&(
+            <MedicineEffectivenessPanel effectiveness={medicineEffectiveness}/>
+          )}
+          {docView==="studies"&&(<>
           <h2 style={{fontSize:18,fontWeight:600,color:"#F0F6FF",marginBottom:16}}>Your Studies</h2>
           {studies.length===0?(
             <div style={{textAlign:"center",padding:"40px 20px",border:"1px dashed #2A3A50",borderRadius:8}}>
@@ -10866,11 +11165,12 @@ const DoctorApp = ({ user, onSignOut, urlStudyId="" }) => {
               ))}
             </div>
           )}
+          </>)}
         </div>
       </div>
     );
   }
-  
+
   // Active study — patient management
   return (
     <div style={{minHeight:"100vh",background:"#0A1628",fontFamily:"'DM Sans',system-ui,sans-serif"}}>
@@ -11848,7 +12148,7 @@ const AddPatientModal = ({ compounds, taxonomy, onClose, onCreate }) => {
                     Patient ID *
                   </div>
                   <MobileInput value={form.patientId} onChange={v=>upd("patientId",v)}
-                    placeholder="Doctor's record ID (e.g. MRN-12345)"/>
+                    placeholder="Practitioner's record ID (e.g. MRN-12345)"/>
                 </div>
                 <div>
                   <div style={{fontSize:11,color:"#8AACCC",fontWeight:600,
@@ -12668,7 +12968,7 @@ const ProfileScreen = ({ profile, onSignOut, patients }) => (
         </div>
         <div>
           <div style={{fontSize:16,fontWeight:700,color:"#F0F6FF"}}>
-            Dr. {profile.fullName}
+            {profile.fullName}
           </div>
           <div style={{fontSize:12,color:"#5A7A9A",marginTop:2}}>
             {profile.specialisation||"Clinical Contributor"}
@@ -12724,6 +13024,8 @@ export default function App(){
   const [outcomes,setOutcomes]             = useState([]);
   const [papers,setPapers]                 = useState([]);
   const savePapers = (p) => { setPapers(p); };
+  const [referencePapers,setReferencePapers] = useState([]);
+  const [medicineEffectiveness,setMedicineEffectiveness] = useState([]);
   const [nepStudies,setNepStudies]         = useState([]);
   const [showCreateStudy,setShowCreateStudy] = useState(false);
   const [studiesCollapsed,setStudiesCollapsed] = useState(false);
@@ -12866,6 +13168,33 @@ export default function App(){
   useEffect(()=>{
     if(user && user.role !== "doctor") loadProjects();
   },[user]);
+
+  /* Reference papers + medicine effectiveness — platform-wide, both roles */
+  const loadReferencePapers=useCallback(async()=>{
+    if(!user) return;
+    try{ setReferencePapers(await API.listReferencePapers()||[]); }
+    catch(e){ console.warn("loadReferencePapers:",e.message); }
+  },[user]);
+  const loadMedicineEffectiveness=useCallback(async()=>{
+    if(!user) return;
+    try{ setMedicineEffectiveness(await API.getMedicineEffectiveness()||[]); }
+    catch(e){ console.warn("loadMedicineEffectiveness:",e.message); }
+  },[user]);
+  useEffect(()=>{ loadReferencePapers(); loadMedicineEffectiveness(); },[user]);
+
+  const uploadReferencePaper=async(data)=>{
+    try{
+      const saved=await API.uploadReferencePaper(data);
+      setReferencePapers(prev=>[saved,...prev]);
+      toast.success("✓ Reference paper uploaded");
+    }catch(e){ toast.error(e.message||"Upload failed"); }
+  };
+  const deleteReferencePaper=async(id)=>{
+    try{
+      await API.deleteReferencePaper(id);
+      setReferencePapers(prev=>prev.filter(p=>p.id!==id));
+    }catch(e){ toast.error(e.message||"Delete failed"); }
+  };
 
   /* Load a project */
   const loadProject=async(proj)=>{
@@ -13113,7 +13442,9 @@ export default function App(){
   if(user.needsRole) return <RoleSetupScreen user={user}
     onDone={({role,name})=>setUser({...user,role,name,needsRole:false})}/>;
   if(user.role==="doctor") return (
-    <DoctorApp user={user} urlStudyId={urlStudyId} onSignOut={async()=>{await API.signOut();setUser(null);window.history.replaceState({},"",window.location.pathname);}}/>
+    <DoctorApp user={user} urlStudyId={urlStudyId}
+      referencePapers={referencePapers} medicineEffectiveness={medicineEffectiveness}
+      onSignOut={async()=>{await API.signOut();setUser(null);window.history.replaceState({},"",window.location.pathname);}}/>
   );
   /* Researcher platform */
   const NavBtn=({id,label,indent=false,badge=null,onClick:customClick})=>{
@@ -13219,6 +13550,8 @@ export default function App(){
               <NavBtn id="papers" label="Papers"
                 badge={papers.length||null}
                 onClick={()=>setActiveTab("papers")}/>
+          <NavBtn id="effectiveness" label="Medicine Effectiveness"
+                onClick={()=>setActiveTab("effectiveness")}/>
           <NavBtn id="compounds" label={`Compounds (${compounds.length})`}/>
           <NavBtn id="mcid"      label="MCID Library"/>
           <NavBtn id="template"  label="Paper Template"/>
@@ -13291,7 +13624,7 @@ export default function App(){
                           </Tag>
                         </div>
                         <div style={{fontSize:11,color:T.text3}}>
-                          {s.compound?.name||"—"} · {s.invitedDoctors?.length||0} doctor(s) · Target: {s.targetSampleSize} patients
+                          {s.compound?.name||"—"} · {s.invitedDoctors?.length||0} practitioner(s) · Target: {s.targetSampleSize} patients
                         </div>
                         {s.invitedDoctors?.length>0&&(
                           <div style={{display:"flex",gap:4,flexWrap:"wrap",marginTop:6}}>
@@ -13343,7 +13676,7 @@ export default function App(){
                             setActiveTab("doctors");
                           }} style={{fontSize:11,color:"#A78BFA",background:"none",border:"1px solid #A78BFA40",
                             borderRadius:4,padding:"4px 10px",cursor:"pointer",fontFamily:"inherit"}}>
-                            👥 Doctor pages ({s.invitedDoctors?.length||0})
+                            👥 Practitioner pages ({s.invitedDoctors?.length||0})
                           </button>
                           <button onClick={()=>{
                             if(confirm(`Delete study "${s.title}"? This cannot be undone.`)){
@@ -13515,7 +13848,7 @@ export default function App(){
                       border:`1px dashed ${T.border2}`,borderRadius:8}}>
                       <div style={{fontSize:32,marginBottom:12,opacity:0.3}}>📊</div>
                       <p style={{fontSize:13,color:T.text3,marginBottom:16}}>
-                        No outcomes yet. Import from doctor patient data.
+                        No outcomes yet. Import from practitioner patient data.
                       </p>
                       <Btn onClick={importPatientOutcomes}>↓ Import patient outcomes</Btn>
                     </div>
@@ -13606,7 +13939,17 @@ export default function App(){
                       savePapers([...papers, rev]);
                     }}
                     onDelete={(id)=>savePapers(papers.filter(p=>p.id!==id))}
-                    compounds={compounds} outcomes={outcomes} refs={refs}/>
+                    compounds={compounds} outcomes={outcomes} refs={refs}
+                    referencePapers={referencePapers}
+                    onUploadReference={uploadReferencePaper}
+                    onDeleteReference={deleteReferencePaper}
+                    canUploadReference={true}/>
+                </div>
+              )}
+
+              {activeTab==="effectiveness"&&(
+                <div className="fade-in">
+                  <MedicineEffectivenessPanel effectiveness={medicineEffectiveness}/>
                 </div>
               )}
 

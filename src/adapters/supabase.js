@@ -761,4 +761,78 @@ export const adapter = {
     const { error } = await supabase.from('patient_weekly_logs').delete().eq('id', logId);
     check(null, error, 'deleteWeeklyLog');
   },
+
+  // ── PATIENT FEEDBACK REPORTS ─────────────────────────────────────────────
+  // Platform-wide, practitioner-owned — no org scoping (see migration 012).
+
+  async listFeedbackReports() {
+    const { data: { user } } = await supabase.auth.getUser();
+    const { data, error } = await supabase
+      .from('patient_feedback_reports')
+      .select('*')
+      .eq('created_by', user.id)
+      .order('created_at', { ascending: false });
+    return check(data || [], error, 'listFeedbackReports');
+  },
+
+  async saveFeedbackReport(report) {
+    const { data: { user } } = await supabase.auth.getUser();
+    const row = {
+      created_by: user.id,
+      complaints: report.complaints || null,
+      medicine: report.medicine,
+      feedback_6mo: report.feedback6mo || report.feedback_6mo || null,
+      rating: Number(report.rating),
+      updated_at: new Date().toISOString(),
+    };
+    if (report.id) row.id = report.id;
+
+    const { data, error } = await supabase
+      .from('patient_feedback_reports')
+      .upsert(row, { onConflict: 'id' })
+      .select().single();
+    return check(data, error, 'saveFeedbackReport');
+  },
+
+  async deleteFeedbackReport(id) {
+    const { error } = await supabase.from('patient_feedback_reports').delete().eq('id', id);
+    check(null, error, 'deleteFeedbackReport');
+  },
+
+  async getMedicineEffectiveness() {
+    const { data, error } = await supabase.rpc('get_medicine_effectiveness');
+    return check(data || [], error, 'getMedicineEffectiveness');
+  },
+
+  // ── REFERENCE PAPERS ─────────────────────────────────────────────────────
+  // Platform-wide — researchers upload, everyone can view/download.
+
+  async listReferencePapers() {
+    const { data, error } = await supabase
+      .from('reference_papers')
+      .select('*')
+      .order('created_at', { ascending: false });
+    return check(data || [], error, 'listReferencePapers');
+  },
+
+  async uploadReferencePaper({ title, fileName, fileSize, fileType, fileData }) {
+    const { data: { user } } = await supabase.auth.getUser();
+    const { data, error } = await supabase
+      .from('reference_papers')
+      .insert({
+        uploaded_by: user.id,
+        title,
+        file_name: fileName,
+        file_size: fileSize,
+        file_type: fileType,
+        file_data: fileData,
+      })
+      .select().single();
+    return check(data, error, 'uploadReferencePaper');
+  },
+
+  async deleteReferencePaper(id) {
+    const { error } = await supabase.from('reference_papers').delete().eq('id', id);
+    check(null, error, 'deleteReferencePaper');
+  },
 };

@@ -13,6 +13,8 @@ const STORE = {
   refs: {},
   compounds: {},
   jobs: {},
+  feedbackReports: [],
+  referencePapers: [],
 };
 
 export const adapter = {
@@ -183,6 +185,60 @@ export const adapter = {
   async pollJob(jobId) {
     await delay(80);
     return STORE.jobs[jobId] || null;
+  },
+
+  // ── PATIENT FEEDBACK REPORTS ─────────────────────────────────────────────
+  async listFeedbackReports() {
+    await delay(200);
+    return [...STORE.feedbackReports];
+  },
+  async saveFeedbackReport(report) {
+    await delay(180);
+    if (report.id) {
+      STORE.feedbackReports = STORE.feedbackReports.map(r => r.id === report.id ? { ...r, ...report } : r);
+      return STORE.feedbackReports.find(r => r.id === report.id);
+    }
+    const saved = {
+      ...report,
+      id: 'fbr-' + Date.now(),
+      patient_id: 'patient_' + (STORE.feedbackReports.length + 1),
+      created_at: new Date().toISOString(),
+    };
+    STORE.feedbackReports.push(saved);
+    return saved;
+  },
+  async deleteFeedbackReport(id) {
+    await delay(150);
+    STORE.feedbackReports = STORE.feedbackReports.filter(r => r.id !== id);
+  },
+  async getMedicineEffectiveness() {
+    await delay(200);
+    const byMedicine = {};
+    STORE.feedbackReports.forEach(r => {
+      if (!byMedicine[r.medicine]) byMedicine[r.medicine] = [];
+      byMedicine[r.medicine].push(Number(r.rating));
+    });
+    return Object.entries(byMedicine).map(([medicine, ratings]) => ({
+      medicine,
+      avg_rating: Math.round((ratings.reduce((a, b) => a + b, 0) / ratings.length) * 100) / 100,
+      report_count: ratings.length,
+    }));
+  },
+
+  // ── REFERENCE PAPERS ─────────────────────────────────────────────────────
+  async listReferencePapers() {
+    await delay(200);
+    return [...STORE.referencePapers];
+  },
+  async uploadReferencePaper(paper) {
+    await delay(300);
+    const saved = { ...paper, id: 'refpaper-' + Date.now(), created_at: new Date().toISOString() };
+    STORE.referencePapers.push(saved);
+    return saved;
+  },
+  async deleteReferencePaper(id) {
+    await delay(150);
+    STORE.referencePapers = STORE.referencePapers.filter(p => p.id !== id);
   },
 };
 
