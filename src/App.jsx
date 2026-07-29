@@ -7624,9 +7624,13 @@ const DoctorPagesPanel = ({ study, allPatients, onBack, onPatientsChange }) => {
 /* ─── PAPERS PANEL ──────────────────────────────────────────────────── */
 const PAPER_SECTIONS = ["Abstract","Introduction","Methods","Results","Discussion","Conclusion","References"];
 
+<<<<<<< Updated upstream
 /* ─── RICH TEXT EDITOR ───────────────────────────────────────────────── */
 
 const PapersPanel = ({ papers, onUpdate, onPublish, onCreateRevision, onDelete }) => {
+=======
+const PapersPanel = ({ papers, onUpdate, onPublish, onCreateRevision, onDelete, onUploadFile, onGetFileUrl }) => {
+>>>>>>> Stashed changes
   const [viewingId, setViewingId] = useState(null);
   const fileInputRef = useRef(null);
   const paper = papers.find(p=>p.id===viewingId);
@@ -7636,9 +7640,11 @@ const PapersPanel = ({ papers, onUpdate, onPublish, onCreateRevision, onDelete }
   const displayVersion = (p) => p.version ?? p.nextVersion ?? 1;
   const nextRevVersion = (p) => (Number(p.version || 0) + 1);
 
-  // Upload handler
-  const handleUpload = (e) => {
+  // Upload handler — persists the replacement file via the adapter (Storage in
+  // Supabase mode) instead of embedding it as base64 in local state.
+  const handleUpload = async (e) => {
     const file = e.target.files?.[0];
+<<<<<<< Updated upstream
     if(!file || !paper) return;
     const reader = new FileReader();
     reader.onload = (ev) => {
@@ -7655,18 +7661,34 @@ const PapersPanel = ({ papers, onUpdate, onPublish, onCreateRevision, onDelete }
       alert("✓ File uploaded and saved against v" + displayVersion(paper));
     };
     reader.readAsDataURL(file);
+=======
+>>>>>>> Stashed changes
     e.target.value = "";
+    if(!file || !paper) return;
+    try {
+      await onUploadFile(paper.id, file);
+      alert("✓ File uploaded and saved against v" + paper.version);
+    } catch(ex) {
+      alert("Upload failed: " + (ex.message||""));
+    }
   };
 
-  // Download the uploaded file
-  const downloadFile = (p) => {
-    if(!p.fileData) return;
-    const a = document.createElement("a");
-    a.href = p.fileData;
-    a.download = p.fileName || "paper.doc";
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
+  // Download the current file — fetch a fresh (signed) URL on demand rather
+  // than keeping the file embedded as base64.
+  const downloadFile = async (p) => {
+    if(!p.fileName) return;
+    try {
+      const url = await onGetFileUrl(p.id);
+      if(!url) return;
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = p.fileName || "paper.doc";
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+    } catch(ex) {
+      alert("Download failed: " + (ex.message||""));
+    }
   };
 
   // ── Paper detail view ──
@@ -7699,7 +7721,7 @@ const PapersPanel = ({ papers, onUpdate, onPublish, onCreateRevision, onDelete }
 
           {/* File status */}
           <div style={{background:T.bg3,borderRadius:8,padding:14,border:`1px solid ${T.border}`,marginBottom:16}}>
-            {paper.fileData?(
+            {paper.fileName?(
               <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
                 <div>
                   <div style={{fontSize:13,color:"#F0F6FF",fontWeight:500}}>{paper.fileName||"paper.doc"}</div>
@@ -7743,9 +7765,15 @@ const PapersPanel = ({ papers, onUpdate, onPublish, onCreateRevision, onDelete }
           {/* Workflow steps */}
           <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:8}}>
             {[
+<<<<<<< Updated upstream
               {step:"1",label:"Generate",desc:"Download .docx from V&G tab",done:true,color:T.green},
               {step:"2",label:"Edit in Word",desc:paper.fileData?"File uploaded ✓":"Edit & upload .doc",
                 done:!!paper.fileData,color:paper.fileData?T.green:T.amber},
+=======
+              {step:"1",label:"Generate",desc:"Download .doc from V&G tab",done:true,color:T.green},
+              {step:"2",label:"Edit in Word",desc:paper.fileName?"File uploaded ✓":"Edit & upload .doc",
+                done:!!paper.fileName,color:paper.fileName?T.green:T.amber},
+>>>>>>> Stashed changes
               {step:"3",label:"Publish",desc:paper.status==="published"?"Published ✓":"Click publish when ready",
                 done:paper.status==="published",color:paper.status==="published"?T.green:"#5A7A9A"},
             ].map(s=>(
@@ -7855,8 +7883,13 @@ const PapersPanel = ({ papers, onUpdate, onPublish, onCreateRevision, onDelete }
                           {p.title||"Untitled"}
                         </div>
                         <div style={{fontSize:11,color:T.text3}}>
+<<<<<<< Updated upstream
                           {p.compound||"—"} · v{displayVersion(p)} · {fmtDate(p.updatedAt)}
                           {p.fileData?" · 📎 File attached":""}
+=======
+                          {p.compound||"—"} · v{p.version} · {fmtDate(p.updatedAt)}
+                          {p.fileName?" · 📎 File attached":""}
+>>>>>>> Stashed changes
                         </div>
                         {p.notes&&(
                           <div style={{fontSize:10,color:T.text3,fontStyle:"italic",marginTop:2,
@@ -7895,8 +7928,13 @@ const PapersPanel = ({ papers, onUpdate, onPublish, onCreateRevision, onDelete }
                           {p.title||"Untitled"}
                         </div>
                         <div style={{fontSize:11,color:T.text3}}>
+<<<<<<< Updated upstream
                           {p.compound||"—"} · v{displayVersion(p)} · Published {fmtDate(p.publishedAt)}
                           {p.fileData?" · 📎 File":""}
+=======
+                          {p.compound||"—"} · v{p.version} · Published {fmtDate(p.publishedAt)}
+                          {p.fileName?" · 📎 File":""}
+>>>>>>> Stashed changes
                         </div>
                       </div>
                       <Tag color={T.green} style={{fontSize:10,flexShrink:0,marginLeft:8}}>Published</Tag>
@@ -7916,6 +7954,11 @@ const PapersPanel = ({ papers, onUpdate, onPublish, onCreateRevision, onDelete }
 
 const GenerationPanel = ({ outcomes, refs, compound, project, projectId, onBack, setPapers }) => {
   const [status, setStatus] = useState("idle"); // idle | running | done | error
+<<<<<<< Updated upstream
+=======
+  const [stage, setStage]   = useState(1);      // 1 = skeleton, 2 = AI expansion
+  const [log, setLog]       = useState([]);
+>>>>>>> Stashed changes
   const [pct, setPct]       = useState(0);
   const [stage, setStage]   = useState(1);
   const [log, setLog]       = useState([]);
@@ -7928,8 +7971,21 @@ const GenerationPanel = ({ outcomes, refs, compound, project, projectId, onBack,
   const n_out = outcomes.length;
   const ess   = score.ess(outcomes.map(o=>({_ws:Number(o._ws)||null})));
 
+<<<<<<< Updated upstream
+=======
+  const addLog = (stg, msg, percent) => {
+    setStage(stg);
+    setLog(prev => [...prev, {t:Date.now(), msg}]);
+    if (percent != null) setPct(percent);
+    setTimeout(() => {
+      if (logRef.current) logRef.current.scrollTop = logRef.current.scrollHeight;
+    }, 0);
+  };
+
+>>>>>>> Stashed changes
   const generate = async () => {
     setStatus("running");
+    setStage(1);
     setLog([]);
     setPct(0);
     setStage(1);
@@ -7938,6 +7994,7 @@ const GenerationPanel = ({ outcomes, refs, compound, project, projectId, onBack,
     const name = (project?.paper_title||compound?.name||"NEP")
       .replace(/[^a-zA-Z0-9]+/g,"_").slice(0,60)+"_Evidence_Paper.docx";
     setFileName(name);
+<<<<<<< Updated upstream
 
     // Animation steps that run in parallel with the actual docx build
     const animSteps = [
@@ -8008,6 +8065,52 @@ const GenerationPanel = ({ outcomes, refs, compound, project, projectId, onBack,
         reader.readAsDataURL(blob);
       }
     }catch(e){
+=======
+    let jobId = null;
+    try {
+      // Best-effort audit row in generated_papers — progress itself stays
+      // client-driven since there's no backend worker yet (Sprint 3).
+      try { jobId = await API.startGeneration(projectId); } catch(e) {}
+
+      addLog(1, "Validating evidence input…", 5);
+      addLog(1, "Computing aggregated metrics…", 15);
+      const progressSteps = [
+        [1, "Building skeleton…", 30],
+        [2, "Assembling Word document…", 70],
+        [2, "Finalising document…", 90],
+      ];
+      let stepIdx = 0;
+      const b = await buildDocxBlob(project, compound, outcomes, refs, () => {
+        if (stepIdx < progressSteps.length) {
+          const [stg, msg, p] = progressSteps[stepIdx++];
+          addLog(stg, msg, p);
+        }
+      });
+      addLog(2, "Document ready ✓", 100);
+      setDocxBlob(b);
+      setStatus("done");
+
+      if (setPapers && jobId) {
+        try {
+          const paper = await API.saveGeneratedPaper(jobId, {
+            blob: b, fileName: name,
+            title: project?.paper_title||(compound?.name||"")+" Evidence Synthesis",
+            compound: compound?.name||"",
+            notes: "Generated "+new Date().toLocaleDateString("en-GB",{day:"2-digit",month:"short",year:"numeric",hour:"2-digit",minute:"2-digit"}),
+          });
+          setPapers(prev=>{
+            const idx = prev.findIndex(p=>p.id===paper.id);
+            if(idx>=0){ const next=[...prev]; next[idx]=paper; return next; }
+            return [...prev, paper];
+          });
+        } catch(ex) {
+          console.warn("Paper save:", ex);
+          toast.error("Manuscript generated, but couldn't be saved to Papers: "+(ex.message||""));
+        }
+      }
+    } catch(e) {
+      addLog(stage, "Error: "+e.message, 0);
+>>>>>>> Stashed changes
       setStatus("error");
       toast.error(e.message||"Generation failed");
     }
@@ -8021,8 +8124,13 @@ const GenerationPanel = ({ outcomes, refs, compound, project, projectId, onBack,
         Ready to generate
       </h3>
       <p style={{fontSize:13,color:T.text3,marginBottom:24,maxWidth:400,margin:"0 auto 24px"}}>
+<<<<<<< Updated upstream
         Two-stage engine: skeleton (~5s) + document assembly (~25s).
         Target: 5,000–8,000 words, IMRaD, Vancouver references.
+=======
+        Two-stage engine: skeleton + AI expansion, generated locally —
+        no server required. Download as .docx when complete.
+>>>>>>> Stashed changes
       </p>
       <div style={{display:"flex",gap:8,justifyContent:"center",marginBottom:24}}>
         {[[`${n_out} outcomes`,T.teal],[`ESS ${(Number(ess)||0).toFixed(2)}`,T.amber],[`${refs.length} refs`,T.purple]]
@@ -10261,7 +10369,7 @@ const _loadStoreForUser = (userId) => {
     catch(e){ return null; }
   })();
   return {
-    projects:[], outcomes:{}, refs:{}, compounds:{},
+    projects:[], outcomes:{}, refs:{}, compounds:{}, papers:{},
     compounds_repo: sharedCompsF||null,
     patients:{}, patientProgress:{},
     studies: sharedStudiesF||[],
@@ -10284,16 +10392,26 @@ const _loadStore = () => {
         };
         u.role = roleMap[u.email.toLowerCase()] || u.role || "researcher";
         return { user:u, jobs:{}, projects:[], outcomes:{},
+<<<<<<< Updated upstream
           refs:{}, compounds:{}, patients:{},
           patientProgress:{}, studies:[], compounds_repo:null,
           papers:{}, paperVersions:{}, paperDrafts:{} };
+=======
+          refs:{}, compounds:{}, papers:{}, patients:{},
+          patientProgress:{}, studies:[], compounds_repo:null };
+>>>>>>> Stashed changes
       }
     }
   } catch(e) {}
   return { user:null, jobs:{}, projects:[], outcomes:{}, refs:{},
+<<<<<<< Updated upstream
     compounds:{}, patients:{}, patientProgress:{},
     studies:[], compounds_repo:null,
     papers:{}, paperVersions:{}, paperDrafts:{} };
+=======
+    compounds:{}, papers:{}, patients:{}, patientProgress:{},
+    studies:[], compounds_repo:null };
+>>>>>>> Stashed changes
 };
 const _STORE = _loadStore();
 const _persist = () => {
@@ -10305,6 +10423,7 @@ const _persist = () => {
       outcomes:        _STORE.outcomes,
       refs:            _STORE.refs,
       compounds:       _STORE.compounds,
+      papers:          _STORE.papers,
       compounds_repo:  _STORE.compounds_repo,
       patients:        _STORE.patients,
       patientProgress: _STORE.patientProgress,
@@ -10352,6 +10471,7 @@ const MockAdapter = {
     _STORE.outcomes       = userData.outcomes;
     _STORE.refs           = userData.refs;
     _STORE.compounds      = userData.compounds;
+    _STORE.papers         = userData.papers || {};
     _STORE.compounds_repo = userData.compounds_repo;
     _STORE.patients       = userData.patients || {};
     _STORE.patientProgress= userData.patientProgress || {};
@@ -10370,7 +10490,7 @@ const MockAdapter = {
     _STORE.user={id:userId,email,name,org:"org-"+userId,
                  role,displayName:name};
     _STORE.projects=[]; _STORE.outcomes={}; _STORE.refs={};
-    _STORE.compounds={}; _STORE.compounds_repo=null;
+    _STORE.compounds={}; _STORE.papers={}; _STORE.compounds_repo=null;
     _STORE.patients={}; _STORE.patientProgress={}; _STORE.studies=[];
     return _STORE.user;
   },
@@ -10513,6 +10633,98 @@ if(outcomes.length<1) issues.push("At least 1 outcome is required");
     return jobId;
   },
   async pollJob(jobId){ await _delay(80); return _STORE.jobs[jobId]||null; },
+
+  /* ── Papers (versioned manuscripts) ── */
+  async listPapers(pid){
+    await _delay(200);
+    return [...(_STORE.papers[pid]||[])].sort((a,b)=>(b.createdAt||0)-(a.createdAt||0));
+  },
+  async saveGeneratedPaper(jobId,{blob,fileName,title,compound,notes}){
+    await _delay(200);
+    const pid = _STORE.jobs[jobId]?.pid;
+    if(!_STORE.papers[pid]) _STORE.papers[pid]=[];
+    const list = _STORE.papers[pid];
+    const existing = list.find(p=>p.compound===(compound||"")&&p.status!=="published");
+    const fileData = await new Promise(res=>{
+      const r=new FileReader(); r.onload=()=>res(r.result); r.readAsDataURL(blob);
+    });
+    const now = Date.now();
+    const history = [...(existing?.history||[]), {date:now,action:"Generated",fileName}];
+    const paper = {
+      id: existing?.id||jobId, title, compound:compound||"", version:existing?.version||"1.0",
+      status:"in_progress", notes:notes||"", history,
+      fileName, fileSize:blob.size, fileType:blob.type||"application/msword", fileData,
+      createdAt:existing?.createdAt||now, updatedAt:now, publishedAt:null,
+    };
+    if(existing){ list[list.indexOf(existing)]=paper; } else { list.push(paper); }
+    _persist();
+    return paper;
+  },
+  async updatePaperMeta(paperId,{title,notes}){
+    await _delay(150);
+    for(const pid in _STORE.papers){
+      const list=_STORE.papers[pid], idx=list.findIndex(p=>p.id===paperId);
+      if(idx>=0){ list[idx]={...list[idx],title,notes,updatedAt:Date.now()}; _persist(); return list[idx]; }
+    }
+    return null;
+  },
+  async publishPaper(paperId){
+    await _delay(150);
+    for(const pid in _STORE.papers){
+      const list=_STORE.papers[pid], idx=list.findIndex(p=>p.id===paperId);
+      if(idx>=0){
+        list[idx]={...list[idx],status:"published",publishedAt:Date.now(),updatedAt:Date.now()};
+        _persist(); return list[idx];
+      }
+    }
+    return null;
+  },
+  async createPaperRevision(paperId){
+    await _delay(150);
+    for(const pid in _STORE.papers){
+      const list=_STORE.papers[pid], orig=list.find(p=>p.id===paperId);
+      if(orig){
+        const rev={...orig, id:"paper-"+Date.now(),
+          version:(Number(orig.version)+0.1).toFixed(1), status:"in_progress",
+          publishedAt:null, updatedAt:Date.now(), createdAt:Date.now(),
+          title:orig.title+" (Revision)", parentPaperId:orig.id};
+        list.push(rev); _persist(); return rev;
+      }
+    }
+    return null;
+  },
+  async deletePaper(paperId){
+    await _delay(150);
+    for(const pid in _STORE.papers){
+      _STORE.papers[pid]=_STORE.papers[pid].filter(p=>p.id!==paperId);
+    }
+    _persist();
+  },
+  async uploadPaperFile(paperId,file){
+    await _delay(200);
+    const fileData = await new Promise(res=>{
+      const r=new FileReader(); r.onload=()=>res(r.result); r.readAsDataURL(file);
+    });
+    for(const pid in _STORE.papers){
+      const list=_STORE.papers[pid], idx=list.findIndex(p=>p.id===paperId);
+      if(idx>=0){
+        const history=[...(list[idx].history||[]),
+          {date:Date.now(),action:"Uploaded edited version",fileName:file.name}];
+        list[idx]={...list[idx], fileName:file.name, fileSize:file.size,
+          fileType:file.type||"application/msword", fileData, history, updatedAt:Date.now()};
+        _persist(); return list[idx];
+      }
+    }
+    return null;
+  },
+  async getPaperFileUrl(paperId){
+    await _delay(80);
+    for(const pid in _STORE.papers){
+      const p=_STORE.papers[pid].find(p=>p.id===paperId);
+      if(p) return p.fileData||null;
+    }
+    return null;
+  },
   async listCompounds() {
     await _delay(150);
     if(!_STORE.compounds_repo) _STORE.compounds_repo=[...SEED_COMPOUNDS];
@@ -10658,6 +10870,7 @@ if(outcomes.length<1) issues.push("At least 1 outcome is required");
     _STORE.outcomes       = userData.outcomes;
     _STORE.refs           = userData.refs;
     _STORE.compounds      = userData.compounds;
+    _STORE.papers         = userData.papers || {};
     _STORE.compounds_repo = userData.compounds_repo;
     _STORE.patients       = userData.patients || {};
     _STORE.patientProgress= userData.patientProgress || {};
@@ -13249,12 +13462,17 @@ export default function App(){
     setProject(proj); setLoading(true);
     if(user?.id) localStorage.setItem(`nep_last_project_${user.id}`, proj.id);
     try{
-      const [outs,rfs,comps]=await Promise.all([
+      const [outs,rfs,comps,ppl]=await Promise.all([
         API.listOutcomes(proj.id),
         API.listRefs(proj.id),
         API.listCompounds(),
+        API.listPapers(proj.id).catch(()=>[]),
       ]);
+<<<<<<< Updated upstream
       loadPapers(proj.id);
+=======
+      setPapers(ppl||[]);
+>>>>>>> Stashed changes
       const migratedOuts=(outs||[]).map(o=>{
         if((o.compound_id||o.compound_name)&&(!o.compounds||o.compounds.length===0)){
           return {...o,compounds:[{
@@ -13871,6 +14089,7 @@ export default function App(){
                     };
                   })()}
                   projectId={project?.id}
+                  setPapers={setPapers}
                   onUpdateProject={updateProjectFull}
                   allPatients={allPatients.filter(p=>
                     !activeCompound||p.primaryCompound?.name===activeCompound)}
@@ -13966,6 +14185,7 @@ export default function App(){
                 <div className="fade-in">
                   <PapersPanel
                     papers={papers}
+<<<<<<< Updated upstream
                     onUpdate={async (p) => {
                       setPapers(prev => prev.map(x => x.id === p.id ? { ...p, updatedAt: Date.now() } : x));
                       try {
@@ -14016,6 +14236,39 @@ export default function App(){
                         if (project?.id) loadPapers(project.id);
                       }
                     }}/>
+=======
+                    onUpdate={async(p)=>{
+                      try{
+                        const updated = await API.updatePaperMeta(p.id, {title:p.title, notes:p.notes});
+                        savePapers(papers.map(x=>x.id===updated.id?updated:x));
+                      }catch(e){ toast.error("Failed to save paper: "+(e.message||"")); }
+                    }}
+                    onPublish={async(id)=>{
+                      try{
+                        const updated = await API.publishPaper(id);
+                        savePapers(papers.map(p=>p.id===updated.id?updated:p));
+                      }catch(e){ toast.error("Failed to publish paper: "+(e.message||"")); }
+                    }}
+                    onCreateRevision={async(id)=>{
+                      try{
+                        const rev = await API.createPaperRevision(id);
+                        savePapers([...papers, rev]);
+                      }catch(e){ toast.error("Failed to create revision: "+(e.message||"")); }
+                    }}
+                    onDelete={async(id)=>{
+                      try{
+                        await API.deletePaper(id);
+                        savePapers(papers.filter(p=>p.id!==id));
+                      }catch(e){ toast.error("Failed to delete paper: "+(e.message||"")); }
+                    }}
+                    onUploadFile={async(paperId,file)=>{
+                      const updated = await API.uploadPaperFile(paperId, file);
+                      savePapers(papers.map(p=>p.id===updated.id?updated:p));
+                      return updated;
+                    }}
+                    onGetFileUrl={(paperId)=>API.getPaperFileUrl(paperId)}
+                    compounds={compounds} outcomes={outcomes} refs={refs}/>
+>>>>>>> Stashed changes
                 </div>
               )}
 
