@@ -93,7 +93,7 @@ ESS = mean(WS) across all outcomes with WS > 0
 
 ## API adapter contract
 
-Every adapter (Mock, Supabase, REST) must implement these methods.
+Every adapter (Mock, Supabase, REST) must implement these 20 methods.
 **Adding a method requires updating ALL adapters.**
 
 | Method | Returns |
@@ -117,14 +117,6 @@ Every adapter (Mock, Supabase, REST) must implement these methods.
 | `validate(projectId)` | `{issues[], warnings[], ready}` |
 | `startGeneration(projectId)` | `jobId: string` |
 | `pollJob(jobId)` | `Job \| null` |
-| `listPapers(projectId)` | `Paper[]` |
-| `saveGeneratedPaper(jobId, {blob, fileName, title, compound, notes})` | `Paper` — finalizes a generation job into a versioned paper (dedupes onto an existing draft for the same compound) |
-| `updatePaperMeta(paperId, {title, notes})` | `Paper` |
-| `publishPaper(paperId)` | `Paper` |
-| `createPaperRevision(paperId)` | `Paper` — clones the parent, version bumped `+0.1` |
-| `deletePaper(paperId)` | `void` |
-| `uploadPaperFile(paperId, file)` | `Paper` — replaces the paper's file (Storage in Supabase mode) |
-| `getPaperFileUrl(paperId)` | `string \| null` — fresh download URL for the paper's current file |
 
 ---
 
