@@ -31,6 +31,15 @@ function check(data, error, label) {
   return data;
 }
 
+// Centralized new-vs-existing check, shared by both auth entry points
+// (email OTP verification and the Google OAuth session resolved after
+// redirect). A user profile row is created for every signup (trigger
+// on auth.users insert), but `role` is left NULL until Registration
+// completes — so "no role yet" IS "doesn't exist as a full account yet".
+function needsRoleFor(profile) {
+  return !['doctor', 'researcher'].includes(profile?.role);
+}
+
 let _cachedOrgId = null;
 async function getOrgId() {
   if (_cachedOrgId) return _cachedOrgId;
@@ -123,21 +132,51 @@ export const adapter = {
     const { data: { session } } = await getClient().auth.getSession();
     if (!session?.user) return null;
     _cachedOrgId = null;
-    const { data: profile } = await getClient()
-      .from('users').select('full_name, org_id, role').eq('id', session.user.id).single();
-    // Profile missing means user was deleted — clear the stale session
+    // The handle_new_user trigger inserts the profile row synchronously, but a
+    // fresh sign-in (esp. the Google OAuth redirect landing) can still race
+    // PostgREST's view of it — retry before concluding it's really missing.
+    // Without this, a first-time Google sign-in would hit the "deleted user"
+    // branch below on the very first request and get bounced back to sign-in.
+    let profile = null;
+    for (let i = 0; i < 3; i++) {
+      const { data: p } = await getClient()
+        .from('users').select('full_name, org_id, role').eq('id', session.user.id).single();
+      if (p) { profile = p; break; }
+      await new Promise(r => setTimeout(r, 500));
+    }
+    // Profile still missing after retries means the user was actually deleted —
+    // clear the stale session.
     if (!profile) {
       await getClient().auth.signOut();
       return null;
     }
-    const role = ['doctor', 'researcher'].includes(profile.role) ? profile.role : 'researcher';
+    const needsRole = needsRoleFor(profile);
+    // Only present for OAuth providers (Google) — nothing to persist it to
+    // yet, just surfaced for the registration screen to display if new.
+    const avatarUrl = session.user.user_metadata?.avatar_url || session.user.user_metadata?.picture || null;
     return {
       id: session.user.id,
       email: session.user.email,
       name: profile.full_name || session.user.email?.split('@')[0],
       org: profile.org_id,
-      role,
+      role: needsRole ? null : profile.role,
+      needsRole,
+      avatarUrl,
     };
+  },
+
+  // Persists the role (+ name) chosen on first login for accounts created
+  // without one — neither Google nor the email-OTP flow ask for a role
+  // upfront anymore, both defer to this after the account already exists.
+  async completeProfile({ role, fullName }) {
+    if (!['doctor', 'researcher'].includes(role)) throw new Error('Invalid role');
+    const { data: { user } } = await supabase.auth.getUser();
+    if (!user) throw new Error('Not authenticated');
+    const updates = { role };
+    if (fullName?.trim()) updates.full_name = fullName.trim();
+    const { error } = await supabase.from('users').update(updates).eq('id', user.id);
+    if (error) throw new Error(`[completeProfile] ${error.message}`);
+    return updates;
   },
 
   // Auth state change subscription — returns { unsubscribe }
@@ -172,25 +211,35 @@ export const adapter = {
     await supabase.auth.signOut();
   },
 
-  async sendOtp(email, name, role) {
-    const isSignIn = !name; // sign-in mode: no name supplied
-    if (isSignIn) {
-      // Block unregistered emails from sign-in — check profile exists first
-      const { data: exists, error: rpcErr } = await supabase.rpc('check_user_exists', { p_email: email });
-      if (!rpcErr && !exists) {
-        throw new Error("No account found for this email. Don't have an account? Please register.");
-      }
-    }
-    const options = { shouldCreateUser: !isSignIn };
-    const metaData = {};
-    if (name) metaData.full_name = name;
-    if (role) metaData.role = role;
-    if (Object.keys(metaData).length) options.data = metaData;
-    const { error } = await supabase.auth.signInWithOtp({ email, options });
+  // Redirect-based OAuth sign-in. Preserves the current URL's meaningful query
+  // params (incl. ?study=/&token= doctor-invite params) so the app can resume
+  // the right context after the provider redirects back — but strips any
+  // leftover auth hash/params first. Using window.location.href verbatim would
+  // bake a stale #access_token=... (e.g. from a Sign Out that didn't clean the
+  // URL) into this redirect target, and the next OAuth round-trip appends a
+  // fresh token set on top instead of replacing it.
+  async signInWithGoogle() {
+    const url = new URL(window.location.href);
+    ['code', 'error', 'error_code', 'error_description', 'state'].forEach(k => url.searchParams.delete(k));
+    url.hash = '';
+    const { error } = await supabase.auth.signInWithOAuth({
+      provider: 'google',
+      options: { redirectTo: url.toString() },
+    });
+    if (error) throw new Error(`[signInWithGoogle] ${error.message}`);
+  },
+
+  // One entry point for any email — Supabase creates the account on first use,
+  // signs in as normal otherwise. New-vs-existing is resolved after verifyOtp,
+  // the same way it's resolved after a Google redirect (see getCurrentUser).
+  async sendOtp(email) {
+    const { error } = await supabase.auth.signInWithOtp({
+      email, options: { shouldCreateUser: true },
+    });
     if (error) throw new Error(`[sendOtp] ${error.message}`);
   },
 
-  async verifyOtp(email, token, intendedRole = null) {
+  async verifyOtp(email, token) {
     const { data, error } = await supabase.auth.verifyOtp({
       email, token, type: 'email',
     });
@@ -204,22 +253,14 @@ export const adapter = {
       if (p) { profile = p; break; }
       await new Promise(r => setTimeout(r, 500));
     }
-    let resolvedRole = ['doctor', 'researcher'].includes(profile?.role) ? profile.role : 'researcher';
-
-    // Registration flow: caller supplied intended role — persist it if it differs
-    if (intendedRole && ['doctor', 'researcher'].includes(intendedRole) && profile) {
-      if (profile.role !== intendedRole) {
-        await supabase.from('users').update({ role: intendedRole }).eq('id', data.user.id);
-      }
-      resolvedRole = intendedRole;
-    }
-
+    const needsRole = needsRoleFor(profile);
     return {
       id: data.user.id,
       email: data.user.email,
       name: profile?.full_name || email.split('@')[0],
       org: profile?.org_id,
-      role: resolvedRole,
+      role: needsRole ? null : profile.role,
+      needsRole,
     };
   },
 
