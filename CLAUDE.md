@@ -123,6 +123,18 @@ Every adapter (Mock, Supabase, REST) must implement these 20 methods.
 | `reviewRegistration(id, {decision, reason?})` | `Registration` (admin only) |
 | `generateAIDraft(projectId, {paperId?, sections?})` | `{jobId, paperId, draftId}` |
 | `pollAIJob(jobId)` | `AiJob \| null` |
+| `inviteReviewer(paperId, {email, name})` | `{success, emailId, token}` |
+| `listReviewInvitations(paperId)` | `ReviewInvitation[]` |
+| `validateReviewInviteToken(paperId, token)` | `{valid, invite_id?, practitioner_email?, paper_title?, expires_at?}` |
+| `markReviewInviteAccepted(paperId, email)` | `void` |
+| `listMyReviewInvitations(email)` | `ReviewInvitation[]` (practitioner) |
+| `getPaperForReview(paperId)` | `{id, title, compound, version, htmlContent, fileName, fileData, fileSize}` (practitioner) |
+| `startPaperReview(paperId)` | `Review` |
+| `saveReviewComment(reviewId, comment)` | `Comment` |
+| `listReviewComments(reviewId)` | `Comment[]` |
+| `submitPaperReview(reviewId, {overallComments, recommendation})` | `Review` |
+| `listPaperFeedback(paperId)` | `Review[]` (each with nested comments) |
+| `updateCommentStatus(commentId, status)` | `Comment` |
 
 ---
 

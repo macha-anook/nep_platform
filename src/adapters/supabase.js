@@ -1111,4 +1111,160 @@ export const adapter = {
 
     throw new Error(`deletePaperEntry: entry ${id} not found`);
   },
+
+  // ── PRACTITIONER REVIEW ──────────────────────────────────────────────────
+  // Practitioner = the existing `doctor` role — same cross-org invite-by-email
+  // model as study_invitations, just scoped to a paper instead of a study.
+
+  async inviteReviewer(paperId, { email, name }) {
+    const orgId = await getOrgId();
+    const { data: { session } } = await supabase.auth.getSession();
+    if (!session) throw new Error('Not authenticated');
+    const { data: body, error } = await supabase.functions.invoke('send-review-invite', {
+      headers: { Authorization: `Bearer ${supabaseKey}` },
+      body: {
+        paperId, practitionerEmail: email, practitionerName: name || null,
+        platformUrl: window.location.origin,
+        researcherEmail: session.user.email,
+        orgId, invitedByUserId: session.user.id,
+      },
+    });
+    if (error) throw new Error(error.message || 'Failed to send invitation');
+    return body;
+  },
+
+  async listReviewInvitations(paperId) {
+    const { data, error } = await supabase
+      .from('paper_review_invitations').select('*').eq('paper_id', paperId)
+      .order('invited_at', { ascending: false });
+    return check(data, error, 'listReviewInvitations');
+  },
+
+  // Practitioner-side: the paper's draft content — reviewers read the
+  // work-in-progress draft (feature #4: "review draft papers"), readable via
+  // the papers_practitioner_via_invite / paper_drafts_practitioner_via_invite
+  // RLS policies (migration 014) rather than org membership.
+  async getPaperForReview(paperId) {
+    const { data: paper, error: pErr } = await supabase.from('papers').select('*').eq('id', paperId).single();
+    if (pErr || !paper) throw new Error('Paper not found or not accessible');
+    const { data: draft, error: dErr } = await supabase
+      .from('paper_drafts').select('*').eq('paper_id', paperId)
+      .order('updated_at', { ascending: false }).limit(1).maybeSingle();
+    if (dErr || !draft) throw new Error('No draft available to review yet');
+    return {
+      id: paper.id, title: draft.title || paper.title, compound: draft.compound || paper.compound,
+      nextVersion: draft.next_version_number, htmlContent: draft.html_content,
+      fileName: draft.file_name, fileData: draft.file_data, fileSize: draft.file_size,
+    };
+  },
+
+  // Validate a token from the invite link before the practitioner has logged in.
+  async validateReviewInviteToken(paperId, token) {
+    const { data, error } = await supabase.rpc('validate_review_invite_token', {
+      p_paper_id: paperId, p_token: token,
+    });
+    if (error || !data || data.length === 0) return { valid: false };
+    return data[0];
+  },
+
+  async markReviewInviteAccepted(paperId, email) {
+    await supabase.from('paper_review_invitations')
+      .update({ invite_status: 'accepted' })
+      .eq('paper_id', paperId).eq('practitioner_email', email.toLowerCase());
+  },
+
+  // Practitioner-side: every paper this reviewer email has been invited to.
+  async listMyReviewInvitations(email) {
+    const { data, error } = await supabase
+      .from('paper_review_invitations')
+      .select('*, papers(title, compound)')
+      .eq('practitioner_email', email.toLowerCase());
+    if (error) { console.warn('[listMyReviewInvitations]', error.message); return []; }
+    return (data || []).map(i => ({
+      id: i.id, paperId: i.paper_id, token: i.token,
+      title: i.papers?.title || '', compound: i.papers?.compound || '',
+      status: i.invite_status, invitedAt: i.invited_at,
+    }));
+  },
+
+  // Resume an in-progress review, or start a new one against the paper's
+  // draft (most recently updated one, if more than one exists).
+  async startPaperReview(paperId) {
+    const { data: { user } } = await supabase.auth.getUser();
+    const email = user.email.toLowerCase();
+
+    const { data: existing } = await supabase
+      .from('paper_reviews').select('*')
+      .eq('paper_id', paperId).eq('reviewer_email', email).eq('status', 'in_progress')
+      .maybeSingle();
+    if (existing) return existing;
+
+    const { data: draft, error: dErr } = await supabase
+      .from('paper_drafts').select('id, org_id').eq('paper_id', paperId)
+      .order('updated_at', { ascending: false }).limit(1).maybeSingle();
+    if (dErr || !draft) throw new Error('No draft available to review yet');
+
+    const { data: invitation } = await supabase
+      .from('paper_review_invitations').select('id')
+      .eq('paper_id', paperId).eq('practitioner_email', email).maybeSingle();
+
+    const { data, error } = await supabase
+      .from('paper_reviews')
+      .insert({
+        paper_id: paperId, paper_draft_id: draft.id, org_id: draft.org_id,
+        invitation_id: invitation?.id || null, reviewer_email: email,
+      })
+      .select().single();
+    return check(data, error, 'startPaperReview');
+  },
+
+  async saveReviewComment(reviewId, comment) {
+    const { data: review } = await supabase
+      .from('paper_reviews').select('paper_id, org_id').eq('id', reviewId).single();
+    if (!review) throw new Error('Review not found');
+    const { data, error } = await supabase
+      .from('paper_review_comments')
+      .insert({
+        review_id: reviewId, paper_id: review.paper_id, org_id: review.org_id,
+        section_key: comment.sectionKey || null, quoted_text: comment.quotedText || null,
+        comment_text: comment.commentText, importance: comment.importance || 'medium',
+      })
+      .select().single();
+    return check(data, error, 'saveReviewComment');
+  },
+
+  async listReviewComments(reviewId) {
+    const { data, error } = await supabase
+      .from('paper_review_comments').select('*').eq('review_id', reviewId)
+      .order('created_at', { ascending: true });
+    return check(data, error, 'listReviewComments');
+  },
+
+  async submitPaperReview(reviewId, { overallComments, recommendation }) {
+    const { data, error } = await supabase
+      .from('paper_reviews')
+      .update({
+        overall_comments: overallComments, recommendation,
+        status: 'submitted', submitted_at: new Date().toISOString(),
+      })
+      .eq('id', reviewId).select().single();
+    return check(data, error, 'submitPaperReview');
+  },
+
+  // Researcher-side: every review + its comments for a paper.
+  async listPaperFeedback(paperId) {
+    const { data, error } = await supabase
+      .from('paper_reviews')
+      .select('*, paper_review_comments(*)')
+      .eq('paper_id', paperId)
+      .order('created_at', { ascending: false });
+    return check(data, error, 'listPaperFeedback');
+  },
+
+  async updateCommentStatus(commentId, status) {
+    const { data, error } = await supabase
+      .from('paper_review_comments').update({ implementation_status: status }).eq('id', commentId)
+      .select().single();
+    return check(data, error, 'updateCommentStatus');
+  },
 };

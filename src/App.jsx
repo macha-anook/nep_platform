@@ -461,6 +461,7 @@ const AuthScreen=({onAuth})=>{
   const [registeredEmail,setRegisteredEmail]=useState("");
 
   const isDoctorUrl=!!new URLSearchParams(window.location.search).get("study");
+  const isReviewUrl=!!new URLSearchParams(window.location.search).get("paper");
   const otpCode=otpDigits.join("");
 
   const signInWithGoogle=async()=>{
@@ -487,6 +488,11 @@ const AuthScreen=({onAuth})=>{
         user.role="doctor";
         user.needsRole=false;
         if(typeof API.markDoctorAuthenticated==="function") API.markDoctorAuthenticated(email, urlInviteToken||null).catch(()=>{});
+      }
+      if(isReviewUrl){
+        user.role="doctor";
+        user.needsRole=false;
+        if(typeof API.markReviewInviteAccepted==="function") API.markReviewInviteAccepted(urlReviewPaperId, email).catch(()=>{});
       }
       onAuth(user);
     }catch(e){
@@ -625,7 +631,7 @@ const AuthScreen=({onAuth})=>{
           /* ── Welcome Step ── */
           <div style={cardStyle}>
             <h2 style={{fontSize:20,fontWeight:700,color:T.text0,marginBottom:4,marginTop:0}}>
-              {isDoctorUrl?"Doctor Sign In":"Welcome"}
+              {(isDoctorUrl||isReviewUrl)?"Doctor Sign In":"Welcome"}
             </h2>
             <div style={{marginTop:20,marginBottom:20}}>
               <FieldLabel label="Email" required/>
@@ -639,7 +645,7 @@ const AuthScreen=({onAuth})=>{
               {loading?"Sending…":"Continue with Email"}
             </Btn>
             {GoogleAuthBlock}
-            {!isDoctorUrl&&(
+            {!isDoctorUrl&&!isReviewUrl&&(
               <div style={{textAlign:"center",marginTop:20}}>
                 <span style={{fontSize:12,color:T.text3}}>New researcher? </span>
                 <button onClick={()=>setMode("register")} style={linkBtn}>Register for access</button>
@@ -7923,6 +7929,43 @@ const PapersPanel = ({ papers, onUpdate, onPublish, onCreateRevision, onDelete, 
   const displayVersion = (p) => p.version ?? p.nextVersion ?? 1;
   const nextRevVersion = (p) => (Number(p.version || 0) + 1);
 
+  // ── Practitioner review — practitioners review the draft itself
+  // (paper_drafts), not a published version, matching "review draft papers". ──
+  const [reviewInvitations, setReviewInvitations] = useState([]);
+  const [paperFeedback, setPaperFeedback] = useState([]);
+  const [inviteForm, setInviteForm] = useState({email:"", name:""});
+  const [inviting, setInviting] = useState(false);
+
+  const loadReviewData = (groupId) => {
+    API.listReviewInvitations(groupId).then(l=>setReviewInvitations(l||[])).catch(()=>setReviewInvitations([]));
+    API.listPaperFeedback(groupId).then(l=>setPaperFeedback(l||[])).catch(()=>setPaperFeedback([]));
+  };
+
+  useEffect(()=>{
+    if(paper?.status!=="published"&&paper?.groupId) loadReviewData(paper.groupId);
+    else { setReviewInvitations([]); setPaperFeedback([]); }
+    setInviteForm({email:"", name:""});
+  },[viewingId]);
+
+  const sendInvite = async () => {
+    if(!inviteForm.email.trim()) return;
+    setInviting(true);
+    try{
+      await API.inviteReviewer(paper.groupId, {email:inviteForm.email.trim(), name:inviteForm.name.trim()});
+      toast.success(`Invitation sent to ${inviteForm.email.trim()}`);
+      setInviteForm({email:"", name:""});
+      loadReviewData(paper.groupId);
+    }catch(e){ toast.error(e.message||"Failed to send invitation"); }
+    finally{ setInviting(false); }
+  };
+
+  const decideComment = async (commentId, status) => {
+    try{
+      await API.updateCommentStatus(commentId, status);
+      loadReviewData(paper.groupId);
+    }catch(e){ toast.error(e.message||"Failed to update comment"); }
+  };
+
   // Upload handler
   const handleUpload = (e) => {
     const file = e.target.files?.[0];
@@ -8101,6 +8144,70 @@ const PapersPanel = ({ papers, onUpdate, onPublish, onCreateRevision, onDelete, 
                 {h.action} — {h.fileName||""}
               </div>
             ))}
+          </div>
+        )}
+
+        {/* Practitioner review — invite practitioners to review this draft
+            and see section-level + overall feedback, recommendations, and
+            per-comment status. Reviewers read the draft itself, not a
+            published version. */}
+        {paper.status!=="published"&&(
+          <div style={{background:T.bg2,borderRadius:10,padding:16,border:`1px solid ${T.border}`,marginBottom:16}}>
+            <div style={{fontSize:10,color:T.teal,fontWeight:700,textTransform:"uppercase",
+              letterSpacing:"0.06em",marginBottom:12}}>Practitioner Review</div>
+
+            {reviewInvitations.length>0&&(
+              <div style={{marginBottom:14}}>
+                {reviewInvitations.map(inv=>(
+                  <div key={inv.id} style={{display:"flex",justifyContent:"space-between",alignItems:"center",
+                    padding:"6px 0",borderBottom:`1px solid ${T.border}`,fontSize:12}}>
+                    <span style={{color:"#F0F6FF"}}>{inv.practitioner_name||inv.practitioner_email}</span>
+                    <Tag color={inv.invite_status==="accepted"?T.green:inv.invite_status==="declined"?T.red:T.amber}>
+                      {inv.invite_status}
+                    </Tag>
+                  </div>
+                ))}
+              </div>
+            )}
+            <div style={{display:"flex",gap:8,marginBottom:16}}>
+              <input value={inviteForm.email} onChange={e=>setInviteForm(f=>({...f,email:e.target.value}))}
+                placeholder="practitioner@clinic.com" type="email" style={{flex:1,fontSize:12}} disabled={inviting}/>
+              <input value={inviteForm.name} onChange={e=>setInviteForm(f=>({...f,name:e.target.value}))}
+                placeholder="Name (optional)" style={{flex:1,fontSize:12}} disabled={inviting}/>
+              <Btn onClick={sendInvite} disabled={inviting||!inviteForm.email.trim()} style={{fontSize:12,padding:"8px 16px"}}>
+                {inviting?"Sending…":"+ Invite"}
+              </Btn>
+            </div>
+
+            {paperFeedback.length===0?(
+              <div style={{fontSize:12,color:T.text3,fontStyle:"italic"}}>No reviews submitted yet.</div>
+            ):(
+              <div style={{display:"flex",flexDirection:"column",gap:12}}>
+                {paperFeedback.map(r=>(
+                  <div key={r.id} style={{background:T.bg3,borderRadius:8,padding:12,border:`1px solid ${T.border}`}}>
+                    <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:6}}>
+                      <span style={{fontSize:12,fontWeight:600,color:"#F0F6FF"}}>{r.reviewer_email}</span>
+                      <Tag color={r.status==="submitted"?T.green:T.amber}>{r.status==="submitted"?(r.recommendation||"submitted"):"in progress"}</Tag>
+                    </div>
+                    {r.overall_comments&&(
+                      <div style={{fontSize:12,color:T.text2,marginBottom:8,lineHeight:1.5}}>{r.overall_comments}</div>
+                    )}
+                    {(r.paper_review_comments||[]).map(c=>(
+                      <div key={c.id} style={{padding:"6px 0",borderTop:`1px solid ${T.border}`}}>
+                        <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:3}}>
+                          <span style={{fontSize:11,color:T.text3}}>{c.section_key||"General"} · {c.importance}</span>
+                          <select value={c.implementation_status} onChange={e=>decideComment(c.id, e.target.value)}
+                            style={{fontSize:11,padding:"2px 6px"}}>
+                            {["pending","accepted","rejected","implemented"].map(s=><option key={s} value={s}>{s}</option>)}
+                          </select>
+                        </div>
+                        <div style={{fontSize:12,color:"#DCE6F5"}}>{c.comment_text}</div>
+                      </div>
+                    ))}
+                  </div>
+                ))}
+              </div>
+            )}
           </div>
         )}
 
@@ -11573,8 +11680,186 @@ const AdminApp = ({ user, onSignOut }) => {
   );
 };
 
-const DoctorApp = ({ user, onSignOut, urlStudyId="" }) => {
+/* ─── PAPER REVIEW SCREEN (doctor reviewing a paper they were invited to) ── */
+const PaperReviewScreen = ({ paperId, email, onBack, onSignOut }) => {
+  const toast = useToast();
+  const [loading, setLoading] = useState(true);
+  const [paper, setPaper] = useState(null);
+  const [review, setReview] = useState(null);
+  const [comments, setComments] = useState([]);
+  const [overallComments, setOverallComments] = useState("");
+  const [recommendation, setRecommendation] = useState("");
+  const [newComment, setNewComment] = useState({sectionKey:"", commentText:"", importance:"medium"});
+  const [addingComment, setAddingComment] = useState(false);
+  const [submitting, setSubmitting] = useState(false);
+
+  useEffect(()=>{
+    let cancelled=false;
+    (async()=>{
+      setLoading(true);
+      try{
+        const [p, rev] = await Promise.all([
+          API.getPaperForReview(paperId),
+          API.startPaperReview(paperId),
+        ]);
+        if(cancelled) return;
+        setPaper(p);
+        setReview(rev);
+        setOverallComments(rev.overall_comments||"");
+        setRecommendation(rev.recommendation||"");
+        const cmts = await API.listReviewComments(rev.id);
+        if(!cancelled) setComments(cmts||[]);
+      }catch(e){ if(!cancelled) toast.error(e.message||"Could not load this paper for review"); }
+      finally{ if(!cancelled) setLoading(false); }
+    })();
+    return ()=>{cancelled=true;};
+  },[paperId]);
+
+  const addComment = async () => {
+    if(!newComment.commentText.trim()) return;
+    setAddingComment(true);
+    try{
+      const saved = await API.saveReviewComment(review.id, newComment);
+      setComments(prev=>[...prev, saved]);
+      setNewComment({sectionKey:"", commentText:"", importance:"medium"});
+    }catch(e){ toast.error(e.message||"Could not save comment"); }
+    finally{ setAddingComment(false); }
+  };
+
+  const submit = async () => {
+    if(!recommendation){ toast.error("Select a recommendation before submitting."); return; }
+    if(!confirm("Submit your review? You won't be able to edit it afterwards.")) return;
+    setSubmitting(true);
+    try{
+      await API.submitPaperReview(review.id, {overallComments, recommendation});
+      toast.success("Review submitted — thank you.");
+      setReview(prev=>({...prev, status:"submitted"}));
+    }catch(e){ toast.error(e.message||"Could not submit review"); }
+    finally{ setSubmitting(false); }
+  };
+
+  if(loading) return (
+    <div style={{minHeight:"100vh",background:"#0A1628",display:"flex",alignItems:"center",justifyContent:"center"}}>
+      <div style={{color:"#5A7A9A",fontSize:13}}>Loading paper…</div>
+    </div>
+  );
+
+  const submitted = review?.status==="submitted";
+
+  return (
+    <div style={{minHeight:"100vh",background:"#0A1628",fontFamily:"'DM Sans',system-ui,sans-serif"}}>
+      <div style={{background:"#0F1923",borderBottom:"1px solid #1A2A3A",
+        padding:"14px 20px",display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+        <div style={{display:"flex",alignItems:"center",gap:10}}>
+          {onBack&&(
+            <button onClick={onBack} style={{background:"none",border:"none",color:"#00D2C8",cursor:"pointer",fontSize:13,fontFamily:"inherit"}}>←</button>
+          )}
+          <div>
+            <div style={{fontSize:13,fontWeight:600,color:"#F0F6FF"}}>{paper?.title||"Paper review"}</div>
+            <div style={{fontSize:10,color:"#5A7A9A"}}>{paper?.compound||""} · {email}</div>
+          </div>
+        </div>
+        <button onClick={onSignOut} style={{fontSize:11,color:"#5A7A9A",background:"none",
+          border:"1px solid #2A3A50",borderRadius:4,padding:"4px 10px",cursor:"pointer",fontFamily:"inherit"}}>
+          Sign out
+        </button>
+      </div>
+
+      <div style={{maxWidth:760,margin:"0 auto",padding:"24px 20px"}}>
+        {submitted&&(
+          <div style={{background:"rgba(0,210,200,0.1)",border:"1px solid #00D2C840",borderRadius:8,
+            padding:14,marginBottom:20,fontSize:13,color:"#00D2C8"}}>
+            ✓ You submitted this review. Thank you — your feedback has been sent to the researcher.
+          </div>
+        )}
+
+        <div style={{background:"#0F1923",borderRadius:10,padding:20,border:"1px solid #1A2A3A",marginBottom:20}}>
+          <div style={{fontSize:10,color:"#00D2C8",fontWeight:700,textTransform:"uppercase",letterSpacing:"0.06em",marginBottom:12}}>
+            Draft · would become v{paper?.nextVersion||1}
+          </div>
+          {paper?.htmlContent?(
+            <div style={{fontSize:13,lineHeight:1.7,color:"#DCE6F5",maxHeight:500,overflowY:"auto"}}
+              dangerouslySetInnerHTML={{__html:paper.htmlContent}}/>
+          ):paper?.fileData?(
+            <div style={{fontSize:13,color:"#8AACCC"}}>
+              This paper's content is in an uploaded file.
+              <a href={paper.fileData} download={paper.fileName||"paper.docx"}
+                style={{color:"#00D2C8",marginLeft:8}}>↓ Download {paper.fileName||"file"}</a>
+            </div>
+          ):(
+            <div style={{fontSize:13,color:"#5A7A9A"}}>No content available for this version yet.</div>
+          )}
+        </div>
+
+        <div style={{background:"#0F1923",borderRadius:10,padding:20,border:"1px solid #1A2A3A",marginBottom:20}}>
+          <div style={{fontSize:10,color:"#00D2C8",fontWeight:700,textTransform:"uppercase",letterSpacing:"0.06em",marginBottom:12}}>
+            Section Comments ({comments.length})
+          </div>
+          {comments.map(c=>(
+            <div key={c.id} style={{padding:"10px 0",borderBottom:"1px solid #1A2A3A"}}>
+              <div style={{fontSize:11,color:"#5A7A9A",marginBottom:4}}>
+                {c.section_key||"General"} · {c.importance}
+              </div>
+              <div style={{fontSize:13,color:"#DCE6F5"}}>{c.comment_text}</div>
+            </div>
+          ))}
+          {!submitted&&(
+            <div style={{marginTop:14,display:"flex",flexDirection:"column",gap:8}}>
+              <input value={newComment.sectionKey} onChange={e=>setNewComment(f=>({...f,sectionKey:e.target.value}))}
+                placeholder="Section (e.g. Introduction) — optional" style={{fontSize:12}}/>
+              <textarea value={newComment.commentText} onChange={e=>setNewComment(f=>({...f,commentText:e.target.value}))}
+                placeholder="Your comment…" rows={2} style={{fontSize:13,resize:"vertical"}}/>
+              <div style={{display:"flex",gap:8,alignItems:"center"}}>
+                <select value={newComment.importance} onChange={e=>setNewComment(f=>({...f,importance:e.target.value}))} style={{fontSize:12}}>
+                  {["low","medium","high","critical"].map(i=><option key={i} value={i}>{i}</option>)}
+                </select>
+                <Btn variant="secondary" onClick={addComment} disabled={addingComment||!newComment.commentText.trim()}>
+                  {addingComment?"Adding…":"+ Add comment"}
+                </Btn>
+              </div>
+            </div>
+          )}
+        </div>
+
+        <div style={{background:"#0F1923",borderRadius:10,padding:20,border:"1px solid #1A2A3A",marginBottom:20}}>
+          <div style={{fontSize:10,color:"#00D2C8",fontWeight:700,textTransform:"uppercase",letterSpacing:"0.06em",marginBottom:12}}>
+            Overall Review
+          </div>
+          <textarea value={overallComments} onChange={e=>setOverallComments(e.target.value)}
+            placeholder="Overall comments for the researcher…" rows={4} disabled={submitted}
+            style={{width:"100%",fontSize:13,resize:"vertical",marginBottom:14,boxSizing:"border-box"}}/>
+          <div style={{display:"flex",flexDirection:"column",gap:8,marginBottom:16}}>
+            {[["accept","Accept"],["minor_revisions","Minor revisions"],["major_revisions","Major revisions"],["reject","Reject"]].map(([val,label])=>(
+              <button key={val} onClick={()=>!submitted&&setRecommendation(val)} disabled={submitted}
+                style={{textAlign:"left",padding:"10px 14px",borderRadius:8,cursor:submitted?"default":"pointer",
+                  border:`2px solid ${recommendation===val?"#00D2C8":"#1A2A3A"}`,
+                  background:recommendation===val?"rgba(0,210,200,0.1)":"#0A1628",
+                  color:"#F0F6FF",fontFamily:"inherit",fontSize:13,fontWeight:600}}>
+                {label}
+              </button>
+            ))}
+          </div>
+          {!submitted&&(
+            <Btn onClick={submit} disabled={submitting} style={{width:"100%",padding:"13px",fontSize:14,fontWeight:700}}>
+              {submitting?"Submitting…":"Submit Review"}
+            </Btn>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+};
+
+const DoctorApp = ({ user, onSignOut, urlStudyId="", urlReviewPaperId="" }) => {
   const email = user?.email||"";
+
+  // Papers this doctor has been invited to review — loaded from Supabase
+  const [reviewInvitations, setReviewInvitations] = useState([]);
+  const [activeReviewPaperId, setActiveReviewPaperId] = useState(urlReviewPaperId||null);
+  useEffect(()=>{
+    if(!email) return;
+    API.listMyReviewInvitations(email).then(list=>setReviewInvitations(list||[])).catch(()=>setReviewInvitations([]));
+  },[email]);
 
   // Studies this doctor is invited to — loaded from Supabase
   const [studies, setStudies] = useState([]);
@@ -11664,6 +11949,11 @@ const DoctorApp = ({ user, onSignOut, urlStudyId="" }) => {
   
   
   
+  if(activeReviewPaperId){
+    return <PaperReviewScreen paperId={activeReviewPaperId} email={email}
+      onBack={()=>setActiveReviewPaperId(null)} onSignOut={onSignOut}/>;
+  }
+
   // Study selection screen
   if(!activeStudyId) {
     return (
@@ -11687,6 +11977,25 @@ const DoctorApp = ({ user, onSignOut, urlStudyId="" }) => {
         </div>
         
         <div style={{padding:"24px 20px",maxWidth:600,margin:"0 auto"}}>
+          {reviewInvitations.length>0&&(
+            <div style={{marginBottom:28}}>
+              <h2 style={{fontSize:18,fontWeight:600,color:"#F0F6FF",marginBottom:16}}>Papers to Review</h2>
+              <div style={{display:"flex",flexDirection:"column",gap:10}}>
+                {reviewInvitations.map(inv=>(
+                  <div key={inv.id} onClick={()=>setActiveReviewPaperId(inv.paperId)}
+                    style={{background:"#0F1923",borderRadius:10,padding:16,
+                      border:"1px solid #1A2A3A",cursor:"pointer",display:"flex",
+                      justifyContent:"space-between",alignItems:"center"}}>
+                    <div>
+                      <div style={{fontSize:14,fontWeight:600,color:"#F0F6FF",marginBottom:4}}>{inv.title||"Untitled paper"}</div>
+                      <div style={{fontSize:11,color:"#8AACCC"}}>{inv.compound||"—"}</div>
+                    </div>
+                    <span style={{fontSize:11,color:"#00D2C8"}}>Review →</span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
           <h2 style={{fontSize:18,fontWeight:600,color:"#F0F6FF",marginBottom:16}}>Your Studies</h2>
           {studies.length===0?(
             <div style={{textAlign:"center",padding:"40px 20px",border:"1px dashed #2A3A50",borderRadius:8}}>
@@ -13623,6 +13932,11 @@ export default function App(){
           u.needsRole=false;
           if(typeof API.markDoctorAuthenticated==="function") API.markDoctorAuthenticated(u.email, urlInviteToken||null).catch(()=>{});
         }
+        if(urlReviewPaperId){
+          u.role="doctor";
+          u.needsRole=false;
+          if(typeof API.markReviewInviteAccepted==="function") API.markReviewInviteAccepted(urlReviewPaperId, u.email).catch(()=>{});
+        }
         setUser(u);
         setAuthLoading(false);
         // Strip the one-time OAuth code/token from the URL (whichever call —
@@ -13977,7 +14291,7 @@ export default function App(){
     </div>
   );
   if(!user) return <AuthScreen onAuth={u=>{
-    if(urlStudyId) u.role="doctor";
+    if(urlStudyId||urlReviewPaperId) u.role="doctor";
     setUser(u); // useEffect([user]) handles data loading based on role
   }}/>;
   const doSignOut=async()=>{await API.signOut();setUser(null);window.history.replaceState({},"",window.location.pathname);};
@@ -13985,7 +14299,7 @@ export default function App(){
     onDone={({role,name})=>setUser({...user,role,name,needsRole:false})}
     onSignOut={doSignOut}/>;
   if(user.role==="doctor") return (
-    <DoctorApp user={user} urlStudyId={urlStudyId} onSignOut={doSignOut}/>
+    <DoctorApp user={user} urlStudyId={urlStudyId} urlReviewPaperId={urlReviewPaperId} onSignOut={doSignOut}/>
   );
   if(user.role==="admin") return (
     <AdminApp user={user} onSignOut={doSignOut}/>
@@ -14585,6 +14899,14 @@ export function Root(){
 
   const urlInviteToken = (() => {
     try { return new URLSearchParams(window.location.search).get("token")||""; }
+    catch(e) { return ""; }
+  })();
+
+  // Practitioner review invite link: ?paper=<paperId>&token=<token> — a
+  // separate param from ?study= so review and clinical-study invite links
+  // never collide, sharing the same generic ?token= as study invites.
+  const urlReviewPaperId = (() => {
+    try { return new URLSearchParams(window.location.search).get("paper")||""; }
     catch(e) { return ""; }
   })();
 
