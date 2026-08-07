@@ -455,6 +455,10 @@ const AuthScreen=({onAuth})=>{
   const otpRefs=useRef([null,null,null,null,null,null]);
   const [focusedIdx,setFocusedIdx]=useState(null);
   const [googleLoading,setGoogleLoading]=useState(false);
+  // "signin" | "register" | "registered" — pre-login self-serve researcher
+  // registration, entirely separate from the OTP/Google sign-in flow below.
+  const [mode,setMode]=useState("signin");
+  const [registeredEmail,setRegisteredEmail]=useState("");
 
   const isDoctorUrl=!!new URLSearchParams(window.location.search).get("study");
   const otpCode=otpDigits.join("");
@@ -525,6 +529,16 @@ const AuthScreen=({onAuth})=>{
   const btnFull={width:"100%",padding:"13px",fontSize:14,fontWeight:700};
   const linkBtn={background:"none",border:"none",color:T.teal,cursor:"pointer",
     fontFamily:"inherit",fontSize:13,fontWeight:600,padding:0};
+
+  if(mode==="register") return (
+    <ResearcherRegistrationForm emailEditable
+      onSubmitted={(submittedEmail)=>{ setRegisteredEmail(submittedEmail); setMode("registered"); }}
+      onBack={()=>setMode("signin")}/>
+  );
+  if(mode==="registered") return (
+    <RegistrationStatusScreen status="pending" email={registeredEmail}
+      onBackToSignIn={()=>setMode("signin")}/>
+  );
 
   const GoogleAuthBlock=(
     <>
@@ -625,6 +639,12 @@ const AuthScreen=({onAuth})=>{
               {loading?"Sending…":"Continue with Email"}
             </Btn>
             {GoogleAuthBlock}
+            {!isDoctorUrl&&(
+              <div style={{textAlign:"center",marginTop:20}}>
+                <span style={{fontSize:12,color:T.text3}}>New researcher? </span>
+                <button onClick={()=>setMode("register")} style={linkBtn}>Register for access</button>
+              </div>
+            )}
           </div>
         )}
       </div>
@@ -633,13 +653,33 @@ const AuthScreen=({onAuth})=>{
 };
 
 /* ─── ROLE SETUP (first-time Google sign-in has no register step) ──────── */
-const RoleSetupScreen=({user,onDone})=>{
+const RoleSetupScreen=({user,onDone,onSignOut})=>{
   const [role,setRole]=useState("researcher");
   // Email sign-ups land here with a fallback name (email prefix, from the DB
   // trigger); Google sign-ups already have a real one — let either be edited.
   const [fullName,setFullName]=useState(user.name||"");
   const [saving,setSaving]=useState(false);
   const [error,setError]=useState("");
+  // Set only when the researcher path is blocked by the registration-approval
+  // gate — {status:'pending'|'rejected'|'none', rejectionReason}. Doctors are
+  // never gated here; they're routed by the existing invite-token mechanism.
+  const [gate,setGate]=useState(null);
+  // A pending/rejected application means intent is already known — checked
+  // up front so a returning applicant never sees the role picker again, not
+  // only after they re-pick "Researcher" and click Continue.
+  const [checkingGate,setCheckingGate]=useState(true);
+
+  useEffect(()=>{
+    let cancelled=false;
+    API.getRegistrationStatus(user.email)
+      .then(({status,rejectionReason})=>{
+        if(cancelled) return;
+        if(status==="pending"||status==="rejected") setGate({status,rejectionReason});
+      })
+      .catch(()=>{})
+      .finally(()=>{ if(!cancelled) setCheckingGate(false); });
+    return ()=>{ cancelled=true; };
+  },[user.email]);
 
   const cardStyle={background:T.bg2,border:`1px solid ${T.border}`,borderRadius:14,
     padding:"28px",boxShadow:"0 24px 80px rgba(0,0,0,0.5)"};
@@ -647,9 +687,37 @@ const RoleSetupScreen=({user,onDone})=>{
   const confirm=async()=>{
     if(!fullName.trim()){setError("Enter your name.");return;}
     setSaving(true);setError("");
-    try{ await API.completeProfile({role,fullName}); onDone({role,name:fullName.trim()}); }
+    try{
+      if(role==="researcher"){
+        const {status,rejectionReason}=await API.getRegistrationStatus(user.email);
+        if(status!=="approved"){ setGate({status,rejectionReason}); setSaving(false); return; }
+      }
+      await API.completeProfile({role,fullName});
+      onDone({role,name:fullName.trim()});
+    }
     catch(e){ setError(e.message||"Could not save your details. Please try again."); setSaving(false); }
   };
+
+  if(checkingGate) return(
+    <div style={{minHeight:"100vh",background:T.bg0,display:"flex",alignItems:"center",justifyContent:"center"}}>
+      <div style={{fontSize:13,color:T.text3,display:"flex",alignItems:"center",gap:10}}>
+        <span style={{animation:"spin 1s linear infinite",display:"inline-block",fontSize:18}}>↻</span>
+        Loading…
+      </div>
+    </div>
+  );
+
+  if(gate){
+    if(gate.status==="none") return (
+      <ResearcherRegistrationForm initialEmail={user.email} emailEditable={false}
+        onSubmitted={()=>setGate({status:"pending"})}
+        onBack={()=>setGate(null)}/>
+    );
+    return (
+      <RegistrationStatusScreen status={gate.status} email={user.email}
+        rejectionReason={gate.rejectionReason} onSignOut={onSignOut}/>
+    );
+  }
 
   const options=[
     ["researcher","Researcher","Build evidence dossiers, score outcomes, generate manuscripts"],
@@ -706,6 +774,152 @@ const RoleSetupScreen=({user,onDone})=>{
             style={{width:"100%",padding:"13px",fontSize:14,fontWeight:700}}>
             {saving?"Saving…":"Continue"}
           </Btn>
+        </div>
+      </div>
+    </div>
+  );
+};
+
+/* ─── RESEARCHER REGISTRATION FORM ───────────────────────────────────────
+   Reused in two places: the pre-login "Register for access" link on
+   AuthScreen (emailEditable, no back-to-app), and the post-login gate in
+   RoleSetupScreen when a signed-in user picks "Researcher" but has no
+   registration on file yet (email locked to their authenticated address). */
+const ResearcherRegistrationForm = ({ initialEmail="", emailEditable=true, onSubmitted, onBack }) => {
+  const [form,setForm] = useState({
+    email: initialEmail, fullName: "", affiliation: "", orcid: "", researchArea: "", intendedUse: "",
+  });
+  const [loading,setLoading] = useState(false);
+  const [error,setError] = useState("");
+
+  const upd = (k,v) => setForm(f=>({...f,[k]:v}));
+
+  const cardStyle={background:T.bg2,border:`1px solid ${T.border}`,borderRadius:14,
+    padding:"28px",boxShadow:"0 24px 80px rgba(0,0,0,0.5)"};
+  const btnFull={width:"100%",padding:"13px",fontSize:14,fontWeight:700};
+
+  const submit=async()=>{
+    if(!form.email.trim()||!form.fullName.trim()){setError("Email and full name are required.");return;}
+    setLoading(true);setError("");
+    try{
+      await API.submitResearcherRegistration(form);
+      onSubmitted(form.email.trim());
+    }catch(e){ setError(e.message||"Could not submit your registration. Please try again."); }
+    finally{ setLoading(false); }
+  };
+
+  return(
+    <div style={{minHeight:"100vh",background:T.bg0,display:"flex",alignItems:"center",
+      justifyContent:"center",padding:"24px"}}>
+      <div style={{width:"100%",maxWidth:440}}>
+        <div style={{display:"flex",flexDirection:"column",alignItems:"center",marginBottom:32}}>
+          <div style={{width:52,height:52,borderRadius:12,background:T.tealBg2,
+            border:`1px solid rgba(0,212,170,0.4)`,display:"flex",alignItems:"center",
+            justifyContent:"center",marginBottom:10}}>
+            <span style={{fontSize:28,fontWeight:800,color:T.teal,fontFamily:T.mono}}>N</span>
+          </div>
+          <div style={{fontSize:18,fontWeight:700,color:T.text0}}>Researcher Registration</div>
+          <div style={{fontSize:12,color:T.text2}}>One-time application — reviewed by our team</div>
+        </div>
+        <div style={cardStyle}>
+          {onBack && (
+            <button onClick={onBack} style={{background:"none",border:"none",color:T.text2,
+              cursor:"pointer",padding:0,fontSize:13,marginBottom:16,fontFamily:"inherit"}}>
+              ← Back to sign in
+            </button>
+          )}
+          <div style={{marginBottom:16}}>
+            <FieldLabel label="Email" required/>
+            <input value={form.email} onChange={e=>upd("email",e.target.value)}
+              placeholder="you@organisation.com" type="email" disabled={!emailEditable||loading}
+              style={!emailEditable?{opacity:0.65,cursor:"not-allowed"}:undefined}/>
+          </div>
+          <div style={{marginBottom:16}}>
+            <FieldLabel label="Full Name" required/>
+            <input value={form.fullName} onChange={e=>upd("fullName",e.target.value)}
+              placeholder="Dr. Jane Smith" disabled={loading}/>
+          </div>
+          <div style={{marginBottom:16}}>
+            <FieldLabel label="Affiliation"/>
+            <input value={form.affiliation} onChange={e=>upd("affiliation",e.target.value)}
+              placeholder="University / Institution" disabled={loading}/>
+          </div>
+          <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:12,marginBottom:16}}>
+            <div>
+              <FieldLabel label="ORCID"/>
+              <input value={form.orcid} onChange={e=>upd("orcid",e.target.value)}
+                placeholder="0000-0000-0000-0000" disabled={loading}/>
+            </div>
+            <div>
+              <FieldLabel label="Research Area"/>
+              <input value={form.researchArea} onChange={e=>upd("researchArea",e.target.value)}
+                placeholder="e.g. Nutraceuticals" disabled={loading}/>
+            </div>
+          </div>
+          <div style={{marginBottom:20}}>
+            <FieldLabel label="Intended Use"/>
+            <textarea value={form.intendedUse} onChange={e=>upd("intendedUse",e.target.value)}
+              placeholder="Briefly describe the research you plan to conduct on NEP Platform"
+              rows={3} disabled={loading} style={{width:"100%",resize:"vertical",fontFamily:"inherit"}}/>
+          </div>
+          {error&&<div style={{fontSize:12,color:T.red,marginBottom:16}}>{error}</div>}
+          <Btn onClick={submit} disabled={loading} style={btnFull}>
+            {loading?"Submitting…":"Submit Application"}
+          </Btn>
+        </div>
+      </div>
+    </div>
+  );
+};
+
+/* ─── REGISTRATION STATUS SCREEN ─────────────────────────────────────────
+   Shown post-login when a researcher's application is pending/rejected, or
+   pre-login right after a fresh submission (status="pending"). */
+const RegistrationStatusScreen = ({ status, email, rejectionReason, onSignOut, onRegisterNow, onBackToSignIn }) => {
+  const cardStyle={background:T.bg2,border:`1px solid ${T.border}`,borderRadius:14,
+    padding:"28px",boxShadow:"0 24px 80px rgba(0,0,0,0.5)",textAlign:"center"};
+
+  const CONTENT={
+    pending:  { icon:"⏳", color:T.amber, title:"Registration Pending Approval",
+      body:`Thanks — we've received your application${email?` for ${email}`:""}. Review typically takes 2–3 business days. You'll get an email as soon as a decision is made.` },
+    rejected: { icon:"✕", color:T.red, title:"Registration Not Approved",
+      body: rejectionReason || "Your application was not approved. Contact support if you believe this is a mistake." },
+    none:     { icon:"◎", color:T.teal, title:"Registration Required",
+      body:"Researcher access on NEP Platform requires a one-time registration reviewed by our team before you can continue." },
+  };
+  const c=CONTENT[status]||CONTENT.pending;
+
+  return(
+    <div style={{minHeight:"100vh",background:T.bg0,display:"flex",alignItems:"center",
+      justifyContent:"center",padding:"24px"}}>
+      <div style={{width:"100%",maxWidth:420}}>
+        <div style={{display:"flex",flexDirection:"column",alignItems:"center",marginBottom:32}}>
+          <div style={{width:52,height:52,borderRadius:12,background:T.tealBg2,
+            border:`1px solid rgba(0,212,170,0.4)`,display:"flex",alignItems:"center",
+            justifyContent:"center",marginBottom:10}}>
+            <span style={{fontSize:28,fontWeight:800,color:T.teal,fontFamily:T.mono}}>N</span>
+          </div>
+          <div style={{fontSize:18,fontWeight:700,color:T.text0}}>NEP Platform</div>
+        </div>
+        <div style={cardStyle}>
+          <div style={{fontSize:32,color:c.color,marginBottom:12}}>{c.icon}</div>
+          <h2 style={{fontSize:18,fontWeight:700,color:T.text0,margin:"0 0 10px"}}>{c.title}</h2>
+          <p style={{fontSize:13,color:T.text2,lineHeight:1.6,marginBottom:24}}>{c.body}</p>
+          {status==="none"&&onRegisterNow&&(
+            <Btn onClick={onRegisterNow} style={{width:"100%",padding:"13px",fontSize:14,fontWeight:700,marginBottom:10}}>
+              Register Now
+            </Btn>
+          )}
+          {onSignOut&&(
+            <Btn variant="secondary" onClick={onSignOut} style={{width:"100%",padding:"13px",fontSize:14,fontWeight:600}}>
+              Sign Out
+            </Btn>
+          )}
+          {onBackToSignIn&&(
+            <Btn variant="secondary" onClick={onBackToSignIn} style={{width:"100%",padding:"13px",fontSize:14,fontWeight:600}}>
+              Back to Sign In
+            </Btn>
+          )}
         </div>
       </div>
     </div>
@@ -11187,6 +11401,127 @@ const loadTaxonomy = () => {
   return DEFAULT_SYMPTOM_TAXONOMY;
 };
 
+/* ─── ADMIN APP (role === "admin") ───────────────────────────────────────
+   Provisioning an admin account is manual/out-of-band (see migration 012 —
+   role='admin' is never reachable via completeProfile()). Scope for Phase 1
+   is the researcher-registration approval queue only. */
+const AdminApp = ({ user, onSignOut }) => {
+  const toast = useToast();
+  const [tab,setTab] = useState("pending");
+  const [regs,setRegs] = useState([]);
+  const [loading,setLoading] = useState(true);
+  const [busyId,setBusyId] = useState(null);
+  const [rejectingId,setRejectingId] = useState(null);
+  const [rejectReason,setRejectReason] = useState("");
+
+  const load = useCallback(async()=>{
+    setLoading(true);
+    try{ setRegs(await API.listRegistrations(tab)||[]); }
+    catch(e){ toast.error(e.message||"Failed to load registrations"); }
+    finally{ setLoading(false); }
+  },[tab]);
+  useEffect(()=>{ load(); },[load]);
+
+  const decide = async(id,decision,reason)=>{
+    setBusyId(id);
+    try{
+      await API.reviewRegistration(id,{decision,reason});
+      toast.success(decision==="approved"?"Registration approved":"Registration rejected");
+      setRejectingId(null); setRejectReason("");
+      load();
+    }catch(e){ toast.error(e.message||"Failed to update registration"); }
+    finally{ setBusyId(null); }
+  };
+
+  const TABS=[["pending","Pending"],["approved","Approved"],["rejected","Rejected"],["all","All"]];
+
+  return (
+    <div style={{minHeight:"100vh",background:"#0A1628",fontFamily:"'DM Sans',system-ui,sans-serif"}}>
+      <div style={{background:"#0F1923",borderBottom:"1px solid #1A2A3A",
+        padding:"14px 20px",display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+        <div style={{display:"flex",alignItems:"center",gap:10}}>
+          <div style={{width:32,height:32,borderRadius:8,background:"#00D2C8",
+            display:"flex",alignItems:"center",justifyContent:"center",fontWeight:800,color:"#0A1628"}}>N</div>
+          <div>
+            <div style={{fontSize:14,fontWeight:700,color:"#F0F6FF"}}>NEP Platform — Admin</div>
+            <div style={{fontSize:11,color:"#5A7A9A"}}>{user.email}</div>
+          </div>
+        </div>
+        <Btn variant="secondary" onClick={onSignOut}>Sign Out</Btn>
+      </div>
+
+      <div style={{maxWidth:900,margin:"0 auto",padding:"28px 20px"}}>
+        <SectionHeader title="Researcher Registrations"
+          subtitle="Review and approve or reject researcher applications"/>
+        <div style={{display:"flex",gap:8,marginBottom:20}}>
+          {TABS.map(([id,label])=>(
+            <button key={id} onClick={()=>setTab(id)}
+              style={{padding:"7px 14px",borderRadius:6,fontSize:13,fontWeight:600,cursor:"pointer",
+                fontFamily:"inherit",border:`1px solid ${tab===id?T.teal:T.border}`,
+                background:tab===id?T.tealBg2:"transparent",color:tab===id?T.teal:T.text2}}>
+              {label}
+            </button>
+          ))}
+        </div>
+
+        {loading ? (
+          <div style={{textAlign:"center",padding:"60px 0",color:T.text3,fontSize:13}}>Loading…</div>
+        ) : regs.length===0 ? (
+          <div style={{textAlign:"center",padding:"60px 0",color:T.text3}}>
+            <div style={{fontSize:28,marginBottom:10,opacity:0.3}}>◎</div>
+            <p style={{fontSize:13}}>No {tab==="all"?"":tab} registrations</p>
+          </div>
+        ) : (
+          <div style={{display:"flex",flexDirection:"column",gap:12}}>
+            {regs.map(r=>(
+              <div key={r.id} style={{background:T.bg2,border:`1px solid ${T.border}`,
+                borderRadius:10,padding:"16px 20px"}}>
+                <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:10}}>
+                  <div>
+                    <div style={{fontSize:14,fontWeight:700,color:T.text0}}>{r.full_name}</div>
+                    <div style={{fontSize:12,color:T.text2}}>{r.email}</div>
+                  </div>
+                  <Tag color={r.status==="approved"?T.green:r.status==="rejected"?T.red:T.amber}>
+                    {r.status}
+                  </Tag>
+                </div>
+                <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8,fontSize:12,color:T.text2,marginBottom:10}}>
+                  {r.affiliation&&<div><strong style={{color:T.text1}}>Affiliation:</strong> {r.affiliation}</div>}
+                  {r.orcid&&<div><strong style={{color:T.text1}}>ORCID:</strong> {r.orcid}</div>}
+                  {r.research_area&&<div><strong style={{color:T.text1}}>Research area:</strong> {r.research_area}</div>}
+                  <div><strong style={{color:T.text1}}>Submitted:</strong> {new Date(r.created_at).toLocaleDateString()}</div>
+                </div>
+                {r.intended_use&&(
+                  <div style={{fontSize:12,color:T.text2,marginBottom:10,fontStyle:"italic"}}>"{r.intended_use}"</div>
+                )}
+                {r.status==="rejected"&&r.rejection_reason&&(
+                  <div style={{fontSize:12,color:T.red,marginBottom:10}}>Reason: {r.rejection_reason}</div>
+                )}
+                {r.status==="pending"&&(
+                  rejectingId===r.id ? (
+                    <div style={{display:"flex",gap:8,alignItems:"flex-start"}}>
+                      <textarea value={rejectReason} onChange={e=>setRejectReason(e.target.value)}
+                        placeholder="Reason for rejection (sent to applicant)" rows={2}
+                        style={{flex:1,resize:"vertical",fontFamily:"inherit"}}/>
+                      <Btn variant="danger" disabled={busyId===r.id||!rejectReason.trim()}
+                        onClick={()=>decide(r.id,"rejected",rejectReason)}>Confirm Reject</Btn>
+                      <Btn variant="secondary" onClick={()=>{setRejectingId(null);setRejectReason("");}}>Cancel</Btn>
+                    </div>
+                  ) : (
+                    <div style={{display:"flex",gap:8}}>
+                      <Btn onClick={()=>decide(r.id,"approved")} disabled={busyId===r.id}>Approve</Btn>
+                      <Btn variant="danger" onClick={()=>setRejectingId(r.id)} disabled={busyId===r.id}>Reject</Btn>
+                    </div>
+                  )
+                )}
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+};
 
 const DoctorApp = ({ user, onSignOut, urlStudyId="" }) => {
   const email = user?.email||"";
@@ -13595,10 +13930,15 @@ export default function App(){
     if(urlStudyId) u.role="doctor";
     setUser(u); // useEffect([user]) handles data loading based on role
   }}/>;
+  const doSignOut=async()=>{await API.signOut();setUser(null);window.history.replaceState({},"",window.location.pathname);};
   if(user.needsRole) return <RoleSetupScreen user={user}
-    onDone={({role,name})=>setUser({...user,role,name,needsRole:false})}/>;
+    onDone={({role,name})=>setUser({...user,role,name,needsRole:false})}
+    onSignOut={doSignOut}/>;
   if(user.role==="doctor") return (
-    <DoctorApp user={user} urlStudyId={urlStudyId} onSignOut={async()=>{await API.signOut();setUser(null);window.history.replaceState({},"",window.location.pathname);}}/>
+    <DoctorApp user={user} urlStudyId={urlStudyId} onSignOut={doSignOut}/>
+  );
+  if(user.role==="admin") return (
+    <AdminApp user={user} onSignOut={doSignOut}/>
   );
   /* Researcher platform */
   const NavBtn=({id,label,indent=false,badge=null,onClick:customClick})=>{

@@ -117,6 +117,10 @@ Every adapter (Mock, Supabase, REST) must implement these 20 methods.
 | `validate(projectId)` | `{issues[], warnings[], ready}` |
 | `startGeneration(projectId)` | `jobId: string` |
 | `pollJob(jobId)` | `Job \| null` |
+| `submitResearcherRegistration({email,fullName,...})` | `Registration` |
+| `getRegistrationStatus(email)` | `{status, rejectionReason}` |
+| `listRegistrations(status?)` | `Registration[]` (admin only) |
+| `reviewRegistration(id, {decision, reason?})` | `Registration` (admin only) |
 
 ---
 

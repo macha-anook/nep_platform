@@ -37,7 +37,7 @@ function check(data, error, label) {
 // on auth.users insert), but `role` is left NULL until Registration
 // completes — so "no role yet" IS "doesn't exist as a full account yet".
 function needsRoleFor(profile) {
-  return !['doctor', 'researcher'].includes(profile?.role);
+  return !['doctor', 'researcher', 'admin'].includes(profile?.role);
 }
 
 let _cachedOrgId = null;
@@ -179,6 +179,61 @@ export const adapter = {
     return updates;
   },
 
+  // ── RESEARCHER REGISTRATION & ADMIN APPROVAL ────────────────────────────────
+
+  // Anon-callable — the applicant has no session yet.
+  async submitResearcherRegistration(data) {
+    const { data: reg, error } = await supabase.rpc('submit_researcher_registration', {
+      p_email: data.email,
+      p_full_name: data.fullName,
+      p_affiliation: data.affiliation || null,
+      p_orcid: data.orcid || null,
+      p_research_area: data.researchArea || null,
+      p_intended_use: data.intendedUse || null,
+    });
+    check(reg, error, 'submitResearcherRegistration');
+    try {
+      await supabase.functions.invoke('send-registration-ack', {
+        headers: { Authorization: `Bearer ${supabaseKey}` },
+        body: { registrationId: reg.id, platformUrl: window.location.origin },
+      });
+    } catch (e) { console.warn('[send-registration-ack]', e.message); }
+    return reg;
+  },
+
+  // Reads the CALLER's own status server-side (resolve_my_researcher_registration
+  // ignores any client-supplied email) — the email param exists only so the
+  // Mock adapter has an equivalent signature.
+  async getRegistrationStatus(_email) {
+    const { data, error } = await supabase.rpc('resolve_my_researcher_registration');
+    check(data, error, 'getRegistrationStatus');
+    const row = Array.isArray(data) ? data[0] : data;
+    return { status: row?.status || 'none', rejectionReason: row?.rejection_reason || null };
+  },
+
+  // Admin-only (enforced by RLS on researcher_registrations).
+  async listRegistrations(status) {
+    let q = supabase.from('researcher_registrations').select('*').order('created_at', { ascending: false });
+    if (status && status !== 'all') q = q.eq('status', status);
+    const { data, error } = await q;
+    return check(data, error, 'listRegistrations');
+  },
+
+  // Admin-only RPC — approves/rejects and unlocks a matching pending account.
+  async reviewRegistration(id, { decision, reason }) {
+    const { data, error } = await supabase.rpc('review_registration', {
+      p_registration_id: id, p_decision: decision, p_reason: reason || null,
+    });
+    check(data, error, 'reviewRegistration');
+    try {
+      await supabase.functions.invoke('send-registration-decision', {
+        headers: { Authorization: `Bearer ${supabaseKey}` },
+        body: { registrationId: id, platformUrl: window.location.origin },
+      });
+    } catch (e) { console.warn('[send-registration-decision]', e.message); }
+    return data;
+  },
+
   // Auth state change subscription — returns { unsubscribe }
   // callback receives (event, session)
   onAuthStateChange(callback) {
@@ -193,7 +248,7 @@ export const adapter = {
     const { data: { user } } = await supabase.auth.getUser();
     const { data: profile } = await supabase
       .from('users').select('full_name, org_id, role').eq('id', user.id).single();
-    const role = ['doctor', 'researcher'].includes(profile?.role) ? profile.role : 'researcher';
+    const role = ['doctor', 'researcher', 'admin'].includes(profile?.role) ? profile.role : 'researcher';
     return { id: user.id, email: user.email, name: profile?.full_name, org: profile?.org_id, role };
   },
 

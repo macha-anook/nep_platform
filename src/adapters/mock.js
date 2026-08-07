@@ -17,6 +17,7 @@ const STORE = {
   papers: {},        // { [paperId]: paper_row }
   paperVersions: {}, // { [paperId]: version_row[] }
   paperDrafts: {},   // { [draftId]: draft_row }
+  registrations: [], // researcher_registrations rows
 };
 
 export const adapter = {
@@ -35,6 +36,53 @@ export const adapter = {
   },
   async signOut() { await delay(200); STORE.user = null; },
   getSession() { return STORE.user; },
+
+  // ── RESEARCHER REGISTRATION & ADMIN APPROVAL ────────────────────────────────
+  async submitResearcherRegistration(data) {
+    await delay(400);
+    const email = (data.email || '').toLowerCase().trim();
+    if (!email || !data.fullName) throw new Error('Email and full name are required');
+    if (STORE.registrations.some(r => r.email === email))
+      throw new Error('An application with this email already exists.');
+    const reg = {
+      id: 'reg-' + Date.now(),
+      email,
+      full_name: data.fullName,
+      affiliation: data.affiliation || '',
+      orcid: data.orcid || '',
+      research_area: data.researchArea || '',
+      intended_use: data.intendedUse || '',
+      status: 'pending',
+      reviewed_by: null,
+      reviewed_at: null,
+      rejection_reason: null,
+      created_at: new Date().toISOString(),
+    };
+    STORE.registrations.push(reg);
+    return reg;
+  },
+  async getRegistrationStatus(email) {
+    await delay(200);
+    const reg = STORE.registrations.find(r => r.email === (email || '').toLowerCase().trim());
+    if (!reg) return { status: 'none', rejectionReason: null };
+    return { status: reg.status, rejectionReason: reg.rejection_reason };
+  },
+  async listRegistrations(status) {
+    await delay(250);
+    return STORE.registrations
+      .filter(r => !status || status === 'all' || r.status === status)
+      .sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
+  },
+  async reviewRegistration(id, { decision, reason }) {
+    await delay(300);
+    const reg = STORE.registrations.find(r => r.id === id);
+    if (!reg) throw new Error('Registration not found');
+    reg.status = decision;
+    reg.reviewed_by = STORE.user?.id || null;
+    reg.reviewed_at = new Date().toISOString();
+    reg.rejection_reason = decision === 'rejected' ? (reason || '') : null;
+    return reg;
+  },
 
   // ── PROJECTS ─────────────────────────────────────────────────────────────
   async listProjects() {
