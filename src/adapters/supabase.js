@@ -621,6 +621,42 @@ export const adapter = {
     };
   },
 
+  // ── AI DRAFT GENERATION ──────────────────────────────────────────────────
+  // The ai_jobs row is inserted here, under the caller's own RLS-scoped
+  // session, so its org_id/project_id are trustworthy before the Edge
+  // Function (service role) ever reads them — the function is invoked with
+  // only the jobId, not fresh project/paper ids from the client.
+  async generateAIDraft(projectId, opts = {}) {
+    const orgId = await getOrgId();
+    const { data: { user } } = await supabase.auth.getUser();
+    const { paperId = null, sections = null } = opts;
+
+    const { data: job, error: jobErr } = await supabase
+      .from('ai_jobs')
+      .insert({
+        org_id: orgId, project_id: projectId, paper_id: paperId,
+        job_type: 'draft_sections', status: 'pending',
+        input_ref: { paperId, sections },
+        created_by: user.id,
+      })
+      .select().single();
+    check(job, jobErr, 'generateAIDraft/insert');
+
+    const { data: body, error } = await supabase.functions.invoke('ai-generate', {
+      headers: { Authorization: `Bearer ${supabaseKey}` },
+      body: { jobId: job.id },
+    });
+    if (error) throw new Error(error.message || 'AI draft generation failed');
+    if (body?.error) throw new Error(body.error);
+    return { jobId: job.id, paperId: body.paperId, draftId: body.draftId };
+  },
+
+  async pollAIJob(jobId) {
+    const { data, error } = await supabase.from('ai_jobs').select('*').eq('id', jobId).single();
+    if (error) return null;
+    return data;
+  },
+
   // ── CLINICAL STUDIES ─────────────────────────────────────────────────────
 
   async listStudies() {
@@ -841,6 +877,7 @@ export const adapter = {
       publishedAt: v.published_at ? new Date(v.published_at).getTime() : null,
       updatedAt: v.published_at ? new Date(v.published_at).getTime() : null,
       createdAt: paper?.created_at ? new Date(paper.created_at).getTime() : null,
+      source: v.source || 'manual',
     };
   },
 
@@ -865,6 +902,7 @@ export const adapter = {
       publishedAt: null,
       updatedAt: d.updated_at ? new Date(d.updated_at).getTime() : null,
       createdAt: d.created_at ? new Date(d.created_at).getTime() : null,
+      source: d.source || 'manual',
     };
   },
 

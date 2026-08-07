@@ -7901,10 +7901,22 @@ const PAPER_SECTIONS = ["Abstract","Introduction","Methods","Results","Discussio
 
 /* ─── RICH TEXT EDITOR ───────────────────────────────────────────────── */
 
-const PapersPanel = ({ papers, onUpdate, onPublish, onCreateRevision, onDelete }) => {
+const PapersPanel = ({ papers, onUpdate, onPublish, onCreateRevision, onDelete, projectId, onGenerateAIDraft }) => {
   const [viewingId, setViewingId] = useState(null);
+  const [generating, setGenerating] = useState(false);
   const fileInputRef = useRef(null);
+  const toast = useToast();
   const paper = papers.find(p=>p.id===viewingId);
+
+  const runAIGenerate = async (paperIdArg) => {
+    if(!projectId || !onGenerateAIDraft || generating) return;
+    setGenerating(true);
+    try{
+      await onGenerateAIDraft(paperIdArg||null);
+      toast.success(paperIdArg?"AI draft regenerated":"AI draft generated");
+    }catch(e){ toast.error(e.message||"AI draft generation failed"); }
+    finally{ setGenerating(false); }
+  };
   const inProgress = papers.filter(p=>p.status!=="published").sort((a,b)=>(b.updatedAt||0)-(a.updatedAt||0));
   const published  = papers.filter(p=>p.status==="published").sort((a,b)=>(b.publishedAt||0)-(a.publishedAt||0));
   const fmtDate = (ts) => ts ? new Date(ts).toLocaleDateString("en-GB",{day:"2-digit",month:"short",year:"numeric"}) : "—";
@@ -7954,6 +7966,9 @@ const PapersPanel = ({ papers, onUpdate, onPublish, onCreateRevision, onDelete }
             style={{background:"none",border:"none",color:T.teal,cursor:"pointer",
               fontSize:13,fontFamily:"inherit"}}>← Back to papers</button>
           <div style={{display:"flex",gap:8,alignItems:"center"}}>
+            {paper.source&&paper.source!=="manual"&&(
+              <Tag color={T.purple}>{paper.source==="ai_draft"?"✨ AI Draft":paper.source}</Tag>
+            )}
             <Tag color={paper.status==="published"?T.green:T.amber}>
               {paper.status==="published"?"Published":"In Progress"}
             </Tag>
@@ -8014,6 +8029,29 @@ const PapersPanel = ({ papers, onUpdate, onPublish, onCreateRevision, onDelete }
             <input ref={fileInputRef} type="file" accept=".doc,.docx,.pdf"
               onChange={handleUpload} style={{display:"none"}}/>
           </div>
+
+          {/* AI-generated draft preview — the html_content produced by the AI
+              draft assistant, shown until a .docx is uploaded over it. */}
+          {paper.htmlContent&&!paper.fileData&&(
+            <div style={{background:T.bg3,borderRadius:8,padding:16,border:`1px solid ${T.border}`,marginBottom:16}}>
+              <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:10}}>
+                <div style={{fontSize:10,color:T.teal,fontWeight:700,textTransform:"uppercase",letterSpacing:"0.06em"}}>
+                  AI-Generated Draft (excludes Results/Analysis/Discussion/Conclusions)
+                </div>
+                {paper.status!=="published"&&projectId&&onGenerateAIDraft&&(
+                  <button onClick={()=>runAIGenerate(paper.groupId)} disabled={generating}
+                    style={{fontSize:12,color:T.teal,background:"none",border:`1px solid ${T.teal}40`,
+                      borderRadius:6,padding:"6px 14px",cursor:generating?"not-allowed":"pointer",
+                      fontFamily:"inherit",opacity:generating?0.6:1}}>
+                    {generating?"Regenerating…":"🔄 Regenerate with AI"}
+                  </button>
+                )}
+              </div>
+              <div style={{background:T.bg1,borderRadius:6,padding:16,maxHeight:400,overflowY:"auto",
+                fontSize:13,lineHeight:1.7,color:"#DCE6F5"}}
+                dangerouslySetInnerHTML={{__html:paper.htmlContent}}/>
+            </div>
+          )}
 
           {/* Workflow steps */}
           <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:8}}>
@@ -8100,7 +8138,18 @@ const PapersPanel = ({ papers, onUpdate, onPublish, onCreateRevision, onDelete }
   return (
     <div className="fade-in">
       <SectionHeader title="Papers"
-        subtitle={`${papers.length} paper(s) · ${published.length} published · ${inProgress.length} in progress`}/>
+        subtitle={`${papers.length} paper(s) · ${published.length} published · ${inProgress.length} in progress`}
+        action={onGenerateAIDraft&&(
+          projectId?(
+            <Btn onClick={()=>runAIGenerate(null)} disabled={generating}>
+              {generating?"Generating…":"✨ Generate AI Draft"}
+            </Btn>
+          ):(
+            <Tooltip text="Open a project first — the AI draft needs its compound, outcomes and references.">
+              <Btn disabled style={{opacity:0.5,cursor:"not-allowed"}}>✨ Generate AI Draft</Btn>
+            </Tooltip>
+          )
+        )}/>
 
       {papers.length===0?(
         <div style={{textAlign:"center",padding:"60px 20px",
@@ -8132,6 +8181,7 @@ const PapersPanel = ({ papers, onUpdate, onPublish, onCreateRevision, onDelete }
                         <div style={{fontSize:11,color:T.text3}}>
                           {p.compound||"—"} · v{displayVersion(p)} · {fmtDate(p.updatedAt)}
                           {p.fileData?" · 📎 File attached":""}
+                          {p.source==="ai_draft"?" · ✨ AI Draft":""}
                         </div>
                         {p.notes&&(
                           <div style={{fontSize:10,color:T.text3,fontStyle:"italic",marginTop:2,
@@ -14464,6 +14514,12 @@ export default function App(){
                         console.warn('[onDelete]', e.message);
                         if (project?.id) loadPapers(project.id);
                       }
+                    }}
+                    projectId={project?.id}
+                    onGenerateAIDraft={async (paperId) => {
+                      if (!project?.id) throw new Error("Select a project first");
+                      await API.generateAIDraft(project.id, { paperId });
+                      await loadPapers(project.id);
                     }}/>
                 </div>
               )}
