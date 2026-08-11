@@ -1275,7 +1275,16 @@ export const adapter = {
         status: 'submitted', submitted_at: new Date().toISOString(),
       })
       .eq('id', reviewId).select().single();
-    return check(data, error, 'submitPaperReview');
+    check(data, error, 'submitPaperReview');
+    // Best-effort — a notification failure must never fail an already-
+    // successful submission from the practitioner's point of view.
+    try {
+      await supabase.functions.invoke('send-review-submitted-notification', {
+        headers: { Authorization: `Bearer ${supabaseKey}` },
+        body: { reviewId, platformUrl: window.location.origin },
+      });
+    } catch (e) { console.warn('[send-review-submitted-notification]', e.message); }
+    return data;
   },
 
   // Researcher-side: every review + its comments for a paper.
@@ -1316,6 +1325,16 @@ export const adapter = {
       .eq('entity_type', 'review_comment').eq('entity_id', commentId)
       .order('created_at', { ascending: false });
     if (error) { console.warn('[listCommentHistory]', error.message); return []; }
+    return data || [];
+  },
+
+  // "Maintain notification history" (feature #8) — every email this org has
+  // been sent (registration, review-submitted, etc.), newest first.
+  async listNotifications(type) {
+    let q = supabase.from('notifications').select('*').order('created_at', { ascending: false });
+    if (type) q = q.eq('type', type);
+    const { data, error } = await q;
+    if (error) { console.warn('[listNotifications]', error.message); return []; }
     return data || [];
   },
 };

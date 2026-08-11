@@ -138,6 +138,7 @@ Every adapter (Mock, Supabase, REST) must implement these 20 methods.
 | `updateCommentStatus(commentId, status)` | `Comment` |
 | `listCommentHistory(commentId)` | `AuditLogEntry[]` |
 | `restorePaperVersion(versionId)` | `Draft` — branches a new draft from an arbitrary past version |
+| `listNotifications(type?)` | `Notification[]` |
 
 ---
 
