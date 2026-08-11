@@ -141,6 +141,13 @@ Every adapter (Mock, Supabase, REST) must implement these 20 methods.
 | `listNotifications(type?)` | `Notification[]` |
 | `listReviewCycles(paperId)` | `ReviewCycle[]` |
 | `closeReviewCycle(cycleId)` | `ReviewCycle` |
+| `invitePostPublicationValidation(paperId)` | `{email, success, error?}[]` — re-invites every past reviewer |
+| `validatePpvToken(paperId, token)` | `{valid, validation_id?, practitioner_email?, paper_title?, expires_at?}` |
+| `listMyValidationInvitations(email)` | `Validation[]` (practitioner) |
+| `getPaperForValidation(paperId)` | `{..., previousVersion, implementedChanges}` (practitioner) |
+| `getMyValidation(paperId)` | `Validation` (practitioner) |
+| `submitPostPublicationFeedback(id, {findingValidation, practicalApplicability, recommendations, futureResearchSuggestions})` | `Validation` |
+| `getPostPublicationReport(paperId)` | `{paper_id, invited, responses, practitioners}` |
 
 ---
 

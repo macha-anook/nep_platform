@@ -462,6 +462,7 @@ const AuthScreen=({onAuth})=>{
 
   const isDoctorUrl=!!new URLSearchParams(window.location.search).get("study");
   const isReviewUrl=!!new URLSearchParams(window.location.search).get("paper");
+  const isValidateUrl=!!new URLSearchParams(window.location.search).get("validate");
   const otpCode=otpDigits.join("");
 
   const signInWithGoogle=async()=>{
@@ -493,6 +494,10 @@ const AuthScreen=({onAuth})=>{
         user.role="doctor";
         user.needsRole=false;
         if(typeof API.markReviewInviteAccepted==="function") API.markReviewInviteAccepted(urlReviewPaperId, email).catch(()=>{});
+      }
+      if(isValidateUrl){
+        user.role="doctor";
+        user.needsRole=false;
       }
       onAuth(user);
     }catch(e){
@@ -631,7 +636,7 @@ const AuthScreen=({onAuth})=>{
           /* ── Welcome Step ── */
           <div style={cardStyle}>
             <h2 style={{fontSize:20,fontWeight:700,color:T.text0,marginBottom:4,marginTop:0}}>
-              {(isDoctorUrl||isReviewUrl)?"Doctor Sign In":"Welcome"}
+              {(isDoctorUrl||isReviewUrl||isValidateUrl)?"Doctor Sign In":"Welcome"}
             </h2>
             <div style={{marginTop:20,marginBottom:20}}>
               <FieldLabel label="Email" required/>
@@ -645,7 +650,7 @@ const AuthScreen=({onAuth})=>{
               {loading?"Sending…":"Continue with Email"}
             </Btn>
             {GoogleAuthBlock}
-            {!isDoctorUrl&&!isReviewUrl&&(
+            {!isDoctorUrl&&!isReviewUrl&&!isValidateUrl&&(
               <div style={{textAlign:"center",marginTop:20}}>
                 <span style={{fontSize:12,color:T.text3}}>New researcher? </span>
                 <button onClick={()=>setMode("register")} style={linkBtn}>Register for access</button>
@@ -7968,6 +7973,30 @@ const PapersPanel = ({ papers, onUpdate, onPublish, onCreateRevision, onDelete, 
     setShowCompare(false); setCompareA(null); setCompareB(null);
   },[viewingId]);
 
+  // ── Post-publication validation (feature #10) — published papers only. ──
+  const [validationReport, setValidationReport] = useState(null);
+  const [requestingValidation, setRequestingValidation] = useState(false);
+
+  useEffect(()=>{
+    if(paper?.status==="published"&&paper?.groupId){
+      API.getPostPublicationReport(paper.groupId).then(setValidationReport).catch(()=>setValidationReport(null));
+    } else setValidationReport(null);
+  },[viewingId]);
+
+  const requestValidation = async () => {
+    setRequestingValidation(true);
+    try{
+      const results = await API.invitePostPublicationValidation(paper.groupId);
+      const okCount = results.filter(r=>r.success).length;
+      const failed = results.filter(r=>!r.success);
+      if(okCount) toast.success(`Validation requested from ${okCount} practitioner(s)`);
+      failed.forEach(f=>toast.error(`${f.email}: ${f.error}`));
+      const report = await API.getPostPublicationReport(paper.groupId);
+      setValidationReport(report);
+    }catch(e){ toast.error(e.message||"Failed to request validation"); }
+    finally{ setRequestingValidation(false); }
+  };
+
   const sendInvite = async () => {
     if(!inviteForm.email.trim()) return;
     setInviting(true);
@@ -8330,6 +8359,36 @@ const PapersPanel = ({ papers, onUpdate, onPublish, onCreateRevision, onDelete, 
                     ))}
                   </div>
                 ))}
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* Post-publication validation — reuses the same practitioners who
+            reviewed earlier drafts (feature #10). */}
+        {paper.status==="published"&&(
+          <div style={{background:T.bg2,borderRadius:10,padding:16,border:`1px solid ${T.border}`,marginBottom:16}}>
+            <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:12}}>
+              <div style={{fontSize:10,color:T.teal,fontWeight:700,textTransform:"uppercase",letterSpacing:"0.06em"}}>
+                Post-Publication Validation
+              </div>
+              <Btn onClick={requestValidation} disabled={requestingValidation} style={{fontSize:12,padding:"6px 14px"}}>
+                {requestingValidation?"Requesting…":"Request Validation"}
+              </Btn>
+            </div>
+            {validationReport&&validationReport.invited>0?(
+              <div style={{fontSize:12,color:T.text2}}>
+                <span style={{color:T.teal,fontWeight:600}}>{validationReport.responses}</span> of{" "}
+                <span style={{fontWeight:600}}>{validationReport.invited}</span> practitioner(s) have submitted their final validation.
+                <div style={{marginTop:8,display:"flex",flexWrap:"wrap",gap:6}}>
+                  {(validationReport.practitioners||[]).map((p,i)=>(
+                    <Tag key={i} color={T.text3}>{p}</Tag>
+                  ))}
+                </div>
+              </div>
+            ):(
+              <div style={{fontSize:12,color:T.text3,fontStyle:"italic"}}>
+                No validation requested yet — this invites every practitioner who reviewed an earlier draft.
               </div>
             )}
           </div>
@@ -12097,7 +12156,153 @@ const PaperReviewScreen = ({ paperId, email, onBack, onSignOut }) => {
   );
 };
 
-const DoctorApp = ({ user, onSignOut, urlStudyId="", urlReviewPaperId="" }) => {
+/* ─── POST-PUBLICATION VALIDATION SCREEN (feature #10) ───────────────────
+   Same practitioner, now validating the FINAL published paper: finding
+   validation, practical applicability, recommendations, future research
+   suggestions — plus a summary of what changed since their last review. */
+const PostPublicationValidationScreen = ({ paperId, email, onBack, onSignOut }) => {
+  const toast = useToast();
+  const [loading, setLoading] = useState(true);
+  const [paper, setPaper] = useState(null);
+  const [validation, setValidation] = useState(null);
+  const [form, setForm] = useState({findingValidation:"", practicalApplicability:"", recommendations:"", futureResearchSuggestions:""});
+  const [submitting, setSubmitting] = useState(false);
+
+  useEffect(()=>{
+    let cancelled=false;
+    (async()=>{
+      setLoading(true);
+      try{
+        const [p, v] = await Promise.all([
+          API.getPaperForValidation(paperId),
+          API.getMyValidation(paperId),
+        ]);
+        if(cancelled) return;
+        setPaper(p);
+        setValidation(v);
+        setForm({
+          findingValidation: v.finding_validation||"",
+          practicalApplicability: v.practical_applicability||"",
+          recommendations: v.recommendations||"",
+          futureResearchSuggestions: v.future_research_suggestions||"",
+        });
+      }catch(e){ if(!cancelled) toast.error(e.message||"Could not load this paper for validation"); }
+      finally{ if(!cancelled) setLoading(false); }
+    })();
+    return ()=>{cancelled=true;};
+  },[paperId]);
+
+  const submit = async () => {
+    if(!confirm("Submit your validation? You won't be able to edit it afterwards.")) return;
+    setSubmitting(true);
+    try{
+      await API.submitPostPublicationFeedback(validation.id, form);
+      toast.success("Validation submitted — you'll receive a copy by email.");
+      setValidation(prev=>({...prev, status:"submitted"}));
+    }catch(e){ toast.error(e.message||"Could not submit validation"); }
+    finally{ setSubmitting(false); }
+  };
+
+  if(loading) return (
+    <div style={{minHeight:"100vh",background:"#0A1628",display:"flex",alignItems:"center",justifyContent:"center"}}>
+      <div style={{color:"#5A7A9A",fontSize:13}}>Loading paper…</div>
+    </div>
+  );
+
+  const submitted = validation?.status==="submitted";
+  const fieldStyle={width:"100%",fontSize:13,resize:"vertical",marginBottom:16,boxSizing:"border-box"};
+
+  return (
+    <div style={{minHeight:"100vh",background:"#0A1628",fontFamily:"'DM Sans',system-ui,sans-serif"}}>
+      <div style={{background:"#0F1923",borderBottom:"1px solid #1A2A3A",
+        padding:"14px 20px",display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+        <div style={{display:"flex",alignItems:"center",gap:10}}>
+          {onBack&&(
+            <button onClick={onBack} style={{background:"none",border:"none",color:"#00D2C8",cursor:"pointer",fontSize:13,fontFamily:"inherit"}}>←</button>
+          )}
+          <div>
+            <div style={{fontSize:13,fontWeight:600,color:"#F0F6FF"}}>{paper?.title||"Post-publication validation"}</div>
+            <div style={{fontSize:10,color:"#5A7A9A"}}>{paper?.compound||""} · v{paper?.version} (final) · {email}</div>
+          </div>
+        </div>
+        <button onClick={onSignOut} style={{fontSize:11,color:"#5A7A9A",background:"none",
+          border:"1px solid #2A3A50",borderRadius:4,padding:"4px 10px",cursor:"pointer",fontFamily:"inherit"}}>
+          Sign out
+        </button>
+      </div>
+
+      <div style={{maxWidth:760,margin:"0 auto",padding:"24px 20px"}}>
+        {submitted&&(
+          <div style={{background:"rgba(0,210,200,0.1)",border:"1px solid #00D2C840",borderRadius:8,
+            padding:14,marginBottom:20,fontSize:13,color:"#00D2C8"}}>
+            ✓ Validation submitted. A copy has been sent to {email}.
+          </div>
+        )}
+
+        <div style={{background:"#0F1923",borderRadius:10,padding:20,border:"1px solid #1A2A3A",marginBottom:20}}>
+          <div style={{fontSize:10,color:"#00D2C8",fontWeight:700,textTransform:"uppercase",letterSpacing:"0.06em",marginBottom:12}}>
+            Final Published Paper (v{paper?.version})
+          </div>
+          {paper?.htmlContent?(
+            <div style={{fontSize:13,lineHeight:1.7,color:"#DCE6F5",maxHeight:400,overflowY:"auto"}}
+              dangerouslySetInnerHTML={{__html:paper.htmlContent}}/>
+          ):(
+            <div style={{fontSize:13,color:"#5A7A9A"}}>No text content — see the paper's downloaded file.</div>
+          )}
+        </div>
+
+        {paper?.implementedChanges?.length>0&&(
+          <div style={{background:"#0F1923",borderRadius:10,padding:20,border:"1px solid #1A2A3A",marginBottom:20}}>
+            <div style={{fontSize:10,color:"#00D2C8",fontWeight:700,textTransform:"uppercase",letterSpacing:"0.06em",marginBottom:12}}>
+              Summary of Implemented Changes ({paper.implementedChanges.length})
+            </div>
+            {paper.implementedChanges.map((c,i)=>(
+              <div key={i} style={{padding:"8px 0",borderTop:i>0?"1px solid #1A2A3A":"none"}}>
+                <div style={{fontSize:11,color:"#5A7A9A",marginBottom:2}}>{c.section_key||"General"}</div>
+                <div style={{fontSize:12,color:"#DCE6F5"}}>{c.comment_text}</div>
+              </div>
+            ))}
+          </div>
+        )}
+
+        {paper?.previousVersion&&(
+          <div style={{background:"#0F1923",borderRadius:10,padding:20,border:"1px solid #1A2A3A",marginBottom:20}}>
+            <div style={{fontSize:10,color:"#00D2C8",fontWeight:700,textTransform:"uppercase",letterSpacing:"0.06em",marginBottom:12}}>
+              Previous Version (v{paper.previousVersion.version}) — for comparison
+            </div>
+            <div style={{fontSize:13,lineHeight:1.7,color:"#8AACCC",maxHeight:250,overflowY:"auto"}}
+              dangerouslySetInnerHTML={{__html:paper.previousVersion.htmlContent||"<p>No text content.</p>"}}/>
+          </div>
+        )}
+
+        <div style={{background:"#0F1923",borderRadius:10,padding:20,border:"1px solid #1A2A3A",marginBottom:20}}>
+          <div style={{fontSize:10,color:"#00D2C8",fontWeight:700,textTransform:"uppercase",letterSpacing:"0.06em",marginBottom:12}}>
+            Your Validation
+          </div>
+          <FieldLabel label="Finding validation" tip="Do the findings hold up in your clinical experience?"/>
+          <textarea value={form.findingValidation} onChange={e=>setForm(f=>({...f,findingValidation:e.target.value}))}
+            rows={3} disabled={submitted} style={fieldStyle}/>
+          <FieldLabel label="Practical applicability"/>
+          <textarea value={form.practicalApplicability} onChange={e=>setForm(f=>({...f,practicalApplicability:e.target.value}))}
+            rows={3} disabled={submitted} style={fieldStyle}/>
+          <FieldLabel label="Recommendations"/>
+          <textarea value={form.recommendations} onChange={e=>setForm(f=>({...f,recommendations:e.target.value}))}
+            rows={3} disabled={submitted} style={fieldStyle}/>
+          <FieldLabel label="Future research suggestions"/>
+          <textarea value={form.futureResearchSuggestions} onChange={e=>setForm(f=>({...f,futureResearchSuggestions:e.target.value}))}
+            rows={3} disabled={submitted} style={{...fieldStyle,marginBottom:20}}/>
+          {!submitted&&(
+            <Btn onClick={submit} disabled={submitting} style={{width:"100%",padding:"13px",fontSize:14,fontWeight:700}}>
+              {submitting?"Submitting…":"Submit Validation"}
+            </Btn>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+};
+
+const DoctorApp = ({ user, onSignOut, urlStudyId="", urlReviewPaperId="", urlValidatePaperId="" }) => {
   const email = user?.email||"";
 
   // Papers this doctor has been invited to review — loaded from Supabase
@@ -12106,6 +12311,15 @@ const DoctorApp = ({ user, onSignOut, urlStudyId="", urlReviewPaperId="" }) => {
   useEffect(()=>{
     if(!email) return;
     API.listMyReviewInvitations(email).then(list=>setReviewInvitations(list||[])).catch(()=>setReviewInvitations([]));
+  },[email]);
+
+  // Papers this doctor has been invited to give final validation on
+  // (feature #10 — same practitioners, after the paper is published).
+  const [validationInvitations, setValidationInvitations] = useState([]);
+  const [activeValidatePaperId, setActiveValidatePaperId] = useState(urlValidatePaperId||null);
+  useEffect(()=>{
+    if(!email) return;
+    API.listMyValidationInvitations(email).then(list=>setValidationInvitations(list||[])).catch(()=>setValidationInvitations([]));
   },[email]);
 
   // Studies this doctor is invited to — loaded from Supabase
@@ -12200,6 +12414,10 @@ const DoctorApp = ({ user, onSignOut, urlStudyId="", urlReviewPaperId="" }) => {
     return <PaperReviewScreen paperId={activeReviewPaperId} email={email}
       onBack={()=>setActiveReviewPaperId(null)} onSignOut={onSignOut}/>;
   }
+  if(activeValidatePaperId){
+    return <PostPublicationValidationScreen paperId={activeValidatePaperId} email={email}
+      onBack={()=>setActiveValidatePaperId(null)} onSignOut={onSignOut}/>;
+  }
 
   // Study selection screen
   if(!activeStudyId) {
@@ -12238,6 +12456,27 @@ const DoctorApp = ({ user, onSignOut, urlStudyId="", urlReviewPaperId="" }) => {
                       <div style={{fontSize:11,color:"#8AACCC"}}>{inv.compound||"—"}</div>
                     </div>
                     <span style={{fontSize:11,color:"#00D2C8"}}>Review →</span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+          {validationInvitations.length>0&&(
+            <div style={{marginBottom:28}}>
+              <h2 style={{fontSize:18,fontWeight:600,color:"#F0F6FF",marginBottom:16}}>Papers to Validate</h2>
+              <div style={{display:"flex",flexDirection:"column",gap:10}}>
+                {validationInvitations.map(v=>(
+                  <div key={v.id} onClick={()=>setActiveValidatePaperId(v.paperId)}
+                    style={{background:"#0F1923",borderRadius:10,padding:16,
+                      border:"1px solid #1A2A3A",cursor:"pointer",display:"flex",
+                      justifyContent:"space-between",alignItems:"center"}}>
+                    <div>
+                      <div style={{fontSize:14,fontWeight:600,color:"#F0F6FF",marginBottom:4}}>{v.title||"Untitled paper"}</div>
+                      <div style={{fontSize:11,color:"#8AACCC"}}>{v.compound||"—"}</div>
+                    </div>
+                    <span style={{fontSize:11,color:v.status==="submitted"?"#5A7A9A":"#00D2C8"}}>
+                      {v.status==="submitted"?"Submitted ✓":"Validate →"}
+                    </span>
                   </div>
                 ))}
               </div>
@@ -14184,6 +14423,10 @@ export default function App(){
           u.needsRole=false;
           if(typeof API.markReviewInviteAccepted==="function") API.markReviewInviteAccepted(urlReviewPaperId, u.email).catch(()=>{});
         }
+        if(urlValidatePaperId){
+          u.role="doctor";
+          u.needsRole=false;
+        }
         setUser(u);
         setAuthLoading(false);
         // Strip the one-time OAuth code/token from the URL (whichever call —
@@ -14538,7 +14781,7 @@ export default function App(){
     </div>
   );
   if(!user) return <AuthScreen onAuth={u=>{
-    if(urlStudyId||urlReviewPaperId) u.role="doctor";
+    if(urlStudyId||urlReviewPaperId||urlValidatePaperId) u.role="doctor";
     setUser(u); // useEffect([user]) handles data loading based on role
   }}/>;
   const doSignOut=async()=>{await API.signOut();setUser(null);window.history.replaceState({},"",window.location.pathname);};
@@ -14546,7 +14789,7 @@ export default function App(){
     onDone={({role,name})=>setUser({...user,role,name,needsRole:false})}
     onSignOut={doSignOut}/>;
   if(user.role==="doctor") return (
-    <DoctorApp user={user} urlStudyId={urlStudyId} urlReviewPaperId={urlReviewPaperId} onSignOut={doSignOut}/>
+    <DoctorApp user={user} urlStudyId={urlStudyId} urlReviewPaperId={urlReviewPaperId} urlValidatePaperId={urlValidatePaperId} onSignOut={doSignOut}/>
   );
   if(user.role==="admin") return (
     <AdminApp user={user} onSignOut={doSignOut}/>
@@ -15171,6 +15414,14 @@ export function Root(){
   // never collide, sharing the same generic ?token= as study invites.
   const urlReviewPaperId = (() => {
     try { return new URLSearchParams(window.location.search).get("paper")||""; }
+    catch(e) { return ""; }
+  })();
+
+  // Post-publication validation link: ?validate=<paperId>&token=<token> —
+  // same practitioners, same token param, different query key so it never
+  // collides with the draft-review link above.
+  const urlValidatePaperId = (() => {
+    try { return new URLSearchParams(window.location.search).get("validate")||""; }
     catch(e) { return ""; }
   })();
 

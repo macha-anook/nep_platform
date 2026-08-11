@@ -1371,4 +1371,132 @@ export const adapter = {
     if (error) { console.warn('[listNotifications]', error.message); return []; }
     return data || [];
   },
+
+  // ── POST-PUBLICATION VALIDATION ──────────────────────────────────────────
+  // Reuses the same practitioners already invited to review this paper
+  // (paper_review_invitations) — feature #10's "automatically invite same
+  // practitioners for validation."
+
+  async invitePostPublicationValidation(paperId) {
+    const orgId = await getOrgId();
+    const { data: { session } } = await supabase.auth.getSession();
+    if (!session) throw new Error('Not authenticated');
+
+    const { data: invitees, error: invErr } = await supabase
+      .from('paper_review_invitations').select('practitioner_email, practitioner_name').eq('paper_id', paperId);
+    check(invitees, invErr, 'invitePostPublicationValidation/invitees');
+    if (!invitees.length) throw new Error('No practitioners have reviewed this paper yet — nothing to re-invite');
+
+    const results = await Promise.all(invitees.map(async (p) => {
+      try {
+        const { data: body, error } = await supabase.functions.invoke('send-validation-invite', {
+          headers: { Authorization: `Bearer ${supabaseKey}` },
+          body: {
+            paperId, practitionerEmail: p.practitioner_email, practitionerName: p.practitioner_name,
+            platformUrl: window.location.origin,
+            researcherEmail: session.user.email, orgId,
+          },
+        });
+        if (error) throw new Error(error.message || 'Failed to send');
+        return { email: p.practitioner_email, success: true, ...body };
+      } catch (e) {
+        return { email: p.practitioner_email, success: false, error: e.message };
+      }
+    }));
+    return results;
+  },
+
+  async validatePpvToken(paperId, token) {
+    const { data, error } = await supabase.rpc('validate_ppv_token', {
+      p_paper_id: paperId, p_token: token,
+    });
+    if (error || !data || data.length === 0) return { valid: false };
+    return data[0];
+  },
+
+  // Practitioner-side inbox, mirrors listMyReviewInvitations.
+  async listMyValidationInvitations(email) {
+    const { data, error } = await supabase
+      .from('post_publication_validations')
+      .select('*, papers(title, compound)')
+      .eq('practitioner_email', email.toLowerCase());
+    if (error) { console.warn('[listMyValidationInvitations]', error.message); return []; }
+    return (data || []).map(v => ({
+      id: v.id, paperId: v.paper_id,
+      title: v.papers?.title || '', compound: v.papers?.compound || '',
+      status: v.status, invitedAt: v.invited_at,
+    }));
+  },
+
+  // Practitioner-side: the final paper + the version it was based on (for
+  // "previous version comparison") + a summary of implemented feedback
+  // (feature #10's "summary of implemented changes" — sourced from
+  // paper_review_comments already marked implemented, not a new dataset).
+  async getPaperForValidation(paperId) {
+    const { data: paper, error: pErr } = await supabase.from('papers').select('*').eq('id', paperId).single();
+    if (pErr || !paper) throw new Error('Paper not found or not accessible');
+
+    const { data: finalVersion, error: vErr } = await supabase
+      .from('paper_versions').select('*').eq('paper_id', paperId).eq('is_current', true).single();
+    if (vErr || !finalVersion) throw new Error('No published version available');
+
+    const { data: previousVersion } = await supabase
+      .from('paper_versions').select('*').eq('paper_id', paperId)
+      .lt('version_number', finalVersion.version_number)
+      .order('version_number', { ascending: false }).limit(1).maybeSingle();
+
+    const { data: implementedComments } = await supabase
+      .from('paper_review_comments').select('section_key, comment_text')
+      .eq('paper_id', paperId).eq('implementation_status', 'implemented');
+
+    return {
+      id: paper.id, title: paper.title, compound: paper.compound,
+      version: finalVersion.version_number, htmlContent: finalVersion.html_content,
+      fileName: finalVersion.file_name, fileData: finalVersion.file_data, fileSize: finalVersion.file_size,
+      previousVersion: previousVersion ? {
+        version: previousVersion.version_number, htmlContent: previousVersion.html_content,
+      } : null,
+      implementedChanges: implementedComments || [],
+    };
+  },
+
+  async getMyValidation(paperId) {
+    const { data: { user } } = await supabase.auth.getUser();
+    const { data, error } = await supabase
+      .from('post_publication_validations').select('*')
+      .eq('paper_id', paperId).eq('practitioner_email', user.email.toLowerCase())
+      .order('invited_at', { ascending: false }).limit(1).maybeSingle();
+    if (error) throw new Error(error.message);
+    if (!data) throw new Error('No validation invitation found for this paper');
+    return data;
+  },
+
+  async submitPostPublicationFeedback(id, { findingValidation, practicalApplicability, recommendations, futureResearchSuggestions }) {
+    const { data, error } = await supabase
+      .from('post_publication_validations')
+      .update({
+        finding_validation: findingValidation,
+        practical_applicability: practicalApplicability,
+        recommendations, future_research_suggestions: futureResearchSuggestions,
+        status: 'submitted', submitted_at: new Date().toISOString(),
+      })
+      .eq('id', id).select().single();
+    check(data, error, 'submitPostPublicationFeedback');
+    try {
+      await supabase.functions.invoke('send-validation-submitted-notification', {
+        headers: { Authorization: `Bearer ${supabaseKey}` },
+        body: { validationId: id, platformUrl: window.location.origin },
+      });
+    } catch (e) { console.warn('[send-validation-submitted-notification]', e.message); }
+    return data;
+  },
+
+  // Consolidated report (feature #10) — reads the security_invoker view, so
+  // it's automatically scoped to the caller's own org via RLS.
+  async getPostPublicationReport(paperId) {
+    const { data, error } = await supabase
+      .from('post_publication_report').select('*').eq('paper_id', paperId).maybeSingle();
+    if (error) { console.warn('[getPostPublicationReport]', error.message); return null; }
+    return data;
+  },
 };
