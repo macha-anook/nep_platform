@@ -1066,6 +1066,19 @@ export const adapter = {
     return this._normDraft(draft, paper);
   },
 
+  // Restore an arbitrary past version into a new editable draft — never
+  // rewrites paper_versions history, just branches a fresh draft from it
+  // (feature #7: "previous version restoration" / "never overwrite").
+  async restorePaperVersion(versionId) {
+    const { data: draft, error } = await supabase
+      .rpc('restore_paper_version', { p_version_id: versionId });
+    check(draft, error, 'restorePaperVersion');
+
+    const { data: paper } = await supabase
+      .from('papers').select('*').eq('id', draft.paper_id).single();
+    return this._normDraft(draft, paper);
+  },
+
   // Delete a draft or a published version by its UI id.
   async deletePaperEntry(id) {
     // Try draft first

@@ -137,6 +137,7 @@ Every adapter (Mock, Supabase, REST) must implement these 20 methods.
 | `listAllFeedback()` | `Review[]` (every paper in the org, each with nested comments) |
 | `updateCommentStatus(commentId, status)` | `Comment` |
 | `listCommentHistory(commentId)` | `AuditLogEntry[]` |
+| `restorePaperVersion(versionId)` | `Draft` — branches a new draft from an arbitrary past version |
 
 ---
 

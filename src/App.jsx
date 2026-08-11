@@ -7907,12 +7907,17 @@ const PAPER_SECTIONS = ["Abstract","Introduction","Methods","Results","Discussio
 
 /* ─── RICH TEXT EDITOR ───────────────────────────────────────────────── */
 
-const PapersPanel = ({ papers, onUpdate, onPublish, onCreateRevision, onDelete, projectId, onGenerateAIDraft }) => {
+const PapersPanel = ({ papers, onUpdate, onPublish, onCreateRevision, onDelete, onRestoreVersion, projectId, onGenerateAIDraft }) => {
   const [viewingId, setViewingId] = useState(null);
   const [generating, setGenerating] = useState(false);
+  const [showCompare, setShowCompare] = useState(false);
+  const [compareA, setCompareA] = useState(null);
+  const [compareB, setCompareB] = useState(null);
   const fileInputRef = useRef(null);
   const toast = useToast();
   const paper = papers.find(p=>p.id===viewingId);
+  const family = paper ? papers.filter(p=>p.groupId===paper.groupId)
+    .sort((a,b)=>(a.version??a.nextVersion??0)-(b.version??b.nextVersion??0)) : [];
 
   const runAIGenerate = async (paperIdArg) => {
     if(!projectId || !onGenerateAIDraft || generating) return;
@@ -7945,6 +7950,7 @@ const PapersPanel = ({ papers, onUpdate, onPublish, onCreateRevision, onDelete, 
     if(paper?.status!=="published"&&paper?.groupId) loadReviewData(paper.groupId);
     else { setReviewInvitations([]); setPaperFeedback([]); }
     setInviteForm({email:"", name:""});
+    setShowCompare(false); setCompareA(null); setCompareB(null);
   },[viewingId]);
 
   const sendInvite = async () => {
@@ -8018,6 +8024,82 @@ const PapersPanel = ({ papers, onUpdate, onPublish, onCreateRevision, onDelete, 
             <Tag color={T.purple}>v{displayVersion(paper)}</Tag>
           </div>
         </div>
+
+        {/* Version timeline — every version + draft in this paper's family,
+            chronological, oldest first. Data already exists in `papers`
+            (feature #7's "complete draft repository" / "chronological
+            timeline") — this just surfaces it; nothing is refetched. */}
+        {family.length>1&&(
+          <div style={{background:T.bg2,borderRadius:10,padding:16,border:`1px solid ${T.border}`,marginBottom:16}}>
+            <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:10}}>
+              <div style={{fontSize:10,color:T.teal,fontWeight:700,textTransform:"uppercase",letterSpacing:"0.06em"}}>
+                Version Timeline
+              </div>
+              <button onClick={()=>setShowCompare(s=>!s)}
+                style={{fontSize:11,color:T.text2,background:"none",border:`1px solid ${T.border2}`,
+                  borderRadius:6,padding:"4px 10px",cursor:"pointer",fontFamily:"inherit"}}>
+                {showCompare?"Hide compare":"Compare versions"}
+              </button>
+            </div>
+            <div style={{display:"flex",flexDirection:"column",gap:6}}>
+              {family.map(f=>(
+                <div key={f.id} style={{display:"flex",justifyContent:"space-between",alignItems:"center",
+                  padding:"8px 10px",borderRadius:6,
+                  background:f.id===paper.id?T.tealBg2:T.bg3,
+                  border:`1px solid ${f.id===paper.id?T.teal:T.border}`}}>
+                  <div onClick={()=>setViewingId(f.id)} style={{cursor:"pointer",flex:1}}>
+                    <span style={{fontSize:12,fontWeight:600,color:"#F0F6FF"}}>
+                      {f.status==="published"?`v${f.version}`:`Draft (→ v${f.nextVersion})`}
+                    </span>
+                    <span style={{fontSize:11,color:T.text3,marginLeft:8}}>
+                      {fmtDate(f.publishedAt||f.updatedAt)}
+                      {f.source&&f.source!=="manual"?` · ${f.source}`:""}
+                    </span>
+                  </div>
+                  {f.status==="published"&&f.id!==paper.id&&(
+                    <button onClick={()=>onRestoreVersion(f.id)}
+                      style={{fontSize:11,color:T.amber,background:"none",border:`1px solid ${T.amber}40`,
+                        borderRadius:6,padding:"4px 10px",cursor:"pointer",fontFamily:"inherit"}}>
+                      Restore
+                    </button>
+                  )}
+                </div>
+              ))}
+            </div>
+
+            {showCompare&&(
+              <div style={{marginTop:14,paddingTop:14,borderTop:`1px solid ${T.border}`}}>
+                <div style={{display:"flex",gap:10,marginBottom:12}}>
+                  <select value={compareA||""} onChange={e=>setCompareA(e.target.value)} style={{flex:1,fontSize:12}}>
+                    <option value="">Version A…</option>
+                    {family.map(f=><option key={f.id} value={f.id}>{f.status==="published"?`v${f.version}`:`Draft (→ v${f.nextVersion})`}</option>)}
+                  </select>
+                  <select value={compareB||""} onChange={e=>setCompareB(e.target.value)} style={{flex:1,fontSize:12}}>
+                    <option value="">Version B…</option>
+                    {family.map(f=><option key={f.id} value={f.id}>{f.status==="published"?`v${f.version}`:`Draft (→ v${f.nextVersion})`}</option>)}
+                  </select>
+                </div>
+                {compareA&&compareB&&(()=>{
+                  const a=family.find(f=>f.id===compareA), b=family.find(f=>f.id===compareB);
+                  const wc=(s)=>(s||"").replace(/<[^>]+>/g," ").trim().split(/\s+/).filter(Boolean).length;
+                  return (
+                    <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:12}}>
+                      {[a,b].map((v,i)=>(
+                        <div key={i} style={{background:T.bg3,borderRadius:8,padding:12,border:`1px solid ${T.border}`}}>
+                          <div style={{fontSize:11,color:T.teal,fontWeight:700,marginBottom:6}}>
+                            {v.status==="published"?`v${v.version}`:`Draft (→ v${v.nextVersion})`} · {wc(v.htmlContent)} words
+                          </div>
+                          <div style={{fontSize:12,lineHeight:1.6,color:"#DCE6F5",maxHeight:300,overflowY:"auto"}}
+                            dangerouslySetInnerHTML={{__html:v.htmlContent||"<p style='color:#5A7A9A'>No text content — see uploaded file.</p>"}}/>
+                        </div>
+                      ))}
+                    </div>
+                  );
+                })()}
+              </div>
+            )}
+          </div>
+        )}
 
         {/* Paper info card */}
         <div style={{background:T.bg2,borderRadius:10,padding:20,border:`1px solid ${T.border}`,marginBottom:16}}>
@@ -14959,6 +15041,15 @@ export default function App(){
                       if (!project?.id) throw new Error("Select a project first");
                       await API.generateAIDraft(project.id, { paperId });
                       await loadPapers(project.id);
+                    }}
+                    onRestoreVersion={async (versionId) => {
+                      try {
+                        await API.restorePaperVersion(versionId);
+                        await loadPapers(project?.id || null);
+                        toast.success("Restored into a new draft");
+                      } catch (e) {
+                        toast.error("Could not restore version: " + e.message);
+                      }
                     }}/>
                 </div>
               )}
