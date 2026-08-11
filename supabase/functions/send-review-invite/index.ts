@@ -50,21 +50,11 @@ serve(async (req: Request) => {
     crypto.getRandomValues(tokenBytes);
     const token = Array.from(tokenBytes).map(b => b.toString(16).padStart(2, "0")).join("");
 
-    const { error: upsertErr } = await adminClient
-      .from("paper_review_invitations")
-      .upsert({
-        paper_id: paperId,
-        org_id: orgId || paper.org_id,
-        practitioner_email: practitionerEmail.toLowerCase(),
-        practitioner_name: practitionerName || practitionerEmail.split("@")[0],
-        token,
-        token_expires_at: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString(),
-        invite_status: "pending",
-        invited_by_user_id: invitedByUserId || null,
-        last_sent_at: new Date().toISOString(),
-      }, { onConflict: "paper_id,practitioner_email" });
-    if (upsertErr) throw new Error(`DB upsert failed: ${upsertErr.message}`);
-
+    // Token is generated up front (needed for the email body below), but the
+    // invitation is NOT written to the database yet — only once Resend
+    // confirms the email actually sent. Otherwise a failed send (e.g. the
+    // sandbox "verify a domain" restriction) would still leave a misleading
+    // "pending" invitation stored with no email ever delivered.
     const reviewUrl = `${platformUrl}?paper=${paperId}&token=${token}`;
 
     const html = renderEmailShell({
@@ -109,6 +99,22 @@ serve(async (req: Request) => {
     });
     const resendData = await resendRes.json();
     if (!resendRes.ok) throw new Error(resendData.message || resendData.name || "Resend API error");
+
+    // Email confirmed sent — now, and only now, persist the invitation.
+    const { error: upsertErr } = await adminClient
+      .from("paper_review_invitations")
+      .upsert({
+        paper_id: paperId,
+        org_id: orgId || paper.org_id,
+        practitioner_email: practitionerEmail.toLowerCase(),
+        practitioner_name: practitionerName || practitionerEmail.split("@")[0],
+        token,
+        token_expires_at: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString(),
+        invite_status: "pending",
+        invited_by_user_id: invitedByUserId || null,
+        last_sent_at: new Date().toISOString(),
+      }, { onConflict: "paper_id,practitioner_email" });
+    if (upsertErr) throw new Error(`Email sent but failed to record invitation: ${upsertErr.message}`);
 
     return new Response(
       JSON.stringify({ success: true, emailId: resendData.id, token }),
