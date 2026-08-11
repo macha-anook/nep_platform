@@ -7938,17 +7938,32 @@ const PapersPanel = ({ papers, onUpdate, onPublish, onCreateRevision, onDelete, 
   // (paper_drafts), not a published version, matching "review draft papers". ──
   const [reviewInvitations, setReviewInvitations] = useState([]);
   const [paperFeedback, setPaperFeedback] = useState([]);
+  const [reviewCycles, setReviewCycles] = useState([]);
   const [inviteForm, setInviteForm] = useState({email:"", name:""});
   const [inviting, setInviting] = useState(false);
+  const [closingCycle, setClosingCycle] = useState(false);
 
   const loadReviewData = (groupId) => {
     API.listReviewInvitations(groupId).then(l=>setReviewInvitations(l||[])).catch(()=>setReviewInvitations([]));
     API.listPaperFeedback(groupId).then(l=>setPaperFeedback(l||[])).catch(()=>setPaperFeedback([]));
+    API.listReviewCycles(groupId).then(l=>setReviewCycles(l||[])).catch(()=>setReviewCycles([]));
+  };
+
+  const currentCycle = reviewCycles[reviewCycles.length-1] || null;
+
+  const closeCycle = async () => {
+    if(!currentCycle || !confirm(`Close review cycle ${currentCycle.cycle_number}? Revise the draft and publish to complete it.`)) return;
+    setClosingCycle(true);
+    try{
+      await API.closeReviewCycle(currentCycle.id);
+      loadReviewData(paper.groupId);
+    }catch(e){ toast.error(e.message||"Failed to close review cycle"); }
+    finally{ setClosingCycle(false); }
   };
 
   useEffect(()=>{
     if(paper?.status!=="published"&&paper?.groupId) loadReviewData(paper.groupId);
-    else { setReviewInvitations([]); setPaperFeedback([]); }
+    else { setReviewInvitations([]); setPaperFeedback([]); setReviewCycles([]); }
     setInviteForm({email:"", name:""});
     setShowCompare(false); setCompareA(null); setCompareB(null);
   },[viewingId]);
@@ -8235,8 +8250,35 @@ const PapersPanel = ({ papers, onUpdate, onPublish, onCreateRevision, onDelete, 
             published version. */}
         {paper.status!=="published"&&(
           <div style={{background:T.bg2,borderRadius:10,padding:16,border:`1px solid ${T.border}`,marginBottom:16}}>
-            <div style={{fontSize:10,color:T.teal,fontWeight:700,textTransform:"uppercase",
-              letterSpacing:"0.06em",marginBottom:12}}>Practitioner Review</div>
+            <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:12}}>
+              <div style={{fontSize:10,color:T.teal,fontWeight:700,textTransform:"uppercase",letterSpacing:"0.06em"}}>
+                Practitioner Review
+              </div>
+              {currentCycle&&(
+                <div style={{display:"flex",gap:8,alignItems:"center"}}>
+                  <Tag color={currentCycle.stage==="review_open"?T.amber:currentCycle.stage==="published"?T.green:T.text3}>
+                    Cycle {currentCycle.cycle_number} · {currentCycle.stage.replace("_"," ")}
+                  </Tag>
+                  {currentCycle.stage==="review_open"&&(
+                    <button onClick={closeCycle} disabled={closingCycle}
+                      style={{fontSize:11,color:T.text2,background:"none",border:`1px solid ${T.border2}`,
+                        borderRadius:6,padding:"4px 10px",cursor:"pointer",fontFamily:"inherit"}}>
+                      {closingCycle?"Closing…":"Close cycle"}
+                    </button>
+                  )}
+                </div>
+              )}
+            </div>
+
+            {reviewCycles.length>1&&(
+              <div style={{display:"flex",flexWrap:"wrap",gap:6,marginBottom:14}}>
+                {reviewCycles.map(c=>(
+                  <Tag key={c.id} color={c.stage==="published"?T.green:c.stage==="review_closed"?T.text3:T.amber}>
+                    Cycle {c.cycle_number}: {c.stage.replace("_"," ")}
+                  </Tag>
+                ))}
+              </div>
+            )}
 
             {reviewInvitations.length>0&&(
               <div style={{marginBottom:14}}>

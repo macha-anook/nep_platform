@@ -1050,6 +1050,13 @@ export const adapter = {
       .rpc('publish_paper_draft', { p_draft_id: draftId });
     check(version, error, 'publishPaperDraft');
 
+    // If this paper's latest review cycle was closed (researcher finished
+    // collecting feedback and revised), publishing here completes it —
+    // feature #9's "New Draft Version" / "Publication" steps. No-op if the
+    // paper was never sent for review, or its cycle is still open.
+    try { await supabase.rpc('advance_review_cycle_on_publish', { p_paper_id: version.paper_id }); }
+    catch (e) { console.warn('[advance_review_cycle_on_publish]', e.message); }
+
     const { data: paper } = await supabase
       .from('papers').select('*').eq('id', version.paper_id).single();
     return this._normVersion(version, paper);
@@ -1133,6 +1140,13 @@ export const adapter = {
     const orgId = await getOrgId();
     const { data: { session } } = await supabase.auth.getSession();
     if (!session) throw new Error('Not authenticated');
+
+    // Cycle bookkeeping is transparent to the researcher — inviting just
+    // works, and cycle 1/2/3… advances automatically as review→revise→
+    // publish repeats (feature #9).
+    const { error: cycleErr } = await supabase.rpc('ensure_open_review_cycle', { p_paper_id: paperId });
+    if (cycleErr) throw new Error(`Could not open a review cycle: ${cycleErr.message}`);
+
     const { data: body, error } = await supabase.functions.invoke('send-review-invite', {
       headers: { Authorization: `Bearer ${supabaseKey}` },
       body: {
@@ -1151,6 +1165,21 @@ export const adapter = {
       .from('paper_review_invitations').select('*').eq('paper_id', paperId)
       .order('invited_at', { ascending: false });
     return check(data, error, 'listReviewInvitations');
+  },
+
+  // Feature #9: full cycle history for a paper — draft → review → revise →
+  // publish, repeated. Chronological, oldest first.
+  async listReviewCycles(paperId) {
+    const { data, error } = await supabase
+      .from('paper_review_cycles').select('*').eq('paper_id', paperId)
+      .order('cycle_number', { ascending: true });
+    return check(data, error, 'listReviewCycles');
+  },
+
+  // Explicit "I'm done collecting feedback for this round" action.
+  async closeReviewCycle(cycleId) {
+    const { data, error } = await supabase.rpc('close_review_cycle', { p_cycle_id: cycleId });
+    return check(data, error, 'closeReviewCycle');
   },
 
   // Practitioner-side: the paper's draft content — reviewers read the
@@ -1232,6 +1261,10 @@ export const adapter = {
       .from('paper_reviews').select('id', { count: 'exact', head: true })
       .eq('paper_id', paperId).eq('reviewer_email', email);
 
+    const { data: cycle } = await supabase
+      .from('paper_review_cycles').select('id')
+      .eq('paper_id', paperId).order('cycle_number', { ascending: false }).limit(1).maybeSingle();
+
     const { data, error } = await supabase
       .from('paper_reviews')
       .insert({
@@ -1240,6 +1273,7 @@ export const adapter = {
         reviewer_name: invitation?.practitioner_name || null,
         version_label: `Draft v${draft.next_version_number}`,
         iteration: (priorCount || 0) + 1,
+        review_cycle_id: cycle?.id || null,
       })
       .select().single();
     return check(data, error, 'startPaperReview');
