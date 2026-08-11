@@ -1189,6 +1189,13 @@ export const adapter = {
 
   // Resume an in-progress review, or start a new one against the paper's
   // draft (most recently updated one, if more than one exists).
+  //
+  // reviewer_name / version_label are denormalized onto the row at creation
+  // time (feature #5: "practitioner details" / "paper version" must be
+  // stored, not just derived) so they survive paper_draft_id going null
+  // once the draft is eventually published and deleted. `iteration` counts
+  // this reviewer's prior passes on this paper — real cross-reviewer cycle
+  // sync is a later phase (Iterative Review Process).
   async startPaperReview(paperId) {
     const { data: { user } } = await supabase.auth.getUser();
     const email = user.email.toLowerCase();
@@ -1200,19 +1207,26 @@ export const adapter = {
     if (existing) return existing;
 
     const { data: draft, error: dErr } = await supabase
-      .from('paper_drafts').select('id, org_id').eq('paper_id', paperId)
+      .from('paper_drafts').select('id, org_id, next_version_number').eq('paper_id', paperId)
       .order('updated_at', { ascending: false }).limit(1).maybeSingle();
     if (dErr || !draft) throw new Error('No draft available to review yet');
 
     const { data: invitation } = await supabase
-      .from('paper_review_invitations').select('id')
+      .from('paper_review_invitations').select('id, practitioner_name')
       .eq('paper_id', paperId).eq('practitioner_email', email).maybeSingle();
+
+    const { count: priorCount } = await supabase
+      .from('paper_reviews').select('id', { count: 'exact', head: true })
+      .eq('paper_id', paperId).eq('reviewer_email', email);
 
     const { data, error } = await supabase
       .from('paper_reviews')
       .insert({
         paper_id: paperId, paper_draft_id: draft.id, org_id: draft.org_id,
         invitation_id: invitation?.id || null, reviewer_email: email,
+        reviewer_name: invitation?.practitioner_name || null,
+        version_label: `Draft v${draft.next_version_number}`,
+        iteration: (priorCount || 0) + 1,
       })
       .select().single();
     return check(data, error, 'startPaperReview');
@@ -1261,10 +1275,34 @@ export const adapter = {
     return check(data, error, 'listPaperFeedback');
   },
 
-  async updateCommentStatus(commentId, status) {
+  // Centralized feedback repository — every review + comments across every
+  // paper in the org, for the cross-paper triage view (feature #5).
+  async listAllFeedback() {
     const { data, error } = await supabase
-      .from('paper_review_comments').update({ implementation_status: status }).eq('id', commentId)
-      .select().single();
+      .from('paper_reviews')
+      .select('*, papers(title, compound), paper_review_comments(*)')
+      .order('created_at', { ascending: false });
+    return check(data, error, 'listAllFeedback');
+  },
+
+  // Routed through update_comment_implementation_status (migration 015) so
+  // every change is captured in audit_log atomically with the write.
+  async updateCommentStatus(commentId, status) {
+    const { data, error } = await supabase.rpc('update_comment_implementation_status', {
+      p_comment_id: commentId, p_status: status,
+    });
     return check(data, error, 'updateCommentStatus');
+  },
+
+  // "Maintain complete feedback audit history" — who changed a comment's
+  // implementation_status, when, and from what to what.
+  async listCommentHistory(commentId) {
+    const { data, error } = await supabase
+      .from('audit_log')
+      .select('*')
+      .eq('entity_type', 'review_comment').eq('entity_id', commentId)
+      .order('created_at', { ascending: false });
+    if (error) { console.warn('[listCommentHistory]', error.message); return []; }
+    return data || [];
   },
 };

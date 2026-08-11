@@ -134,7 +134,9 @@ Every adapter (Mock, Supabase, REST) must implement these 20 methods.
 | `listReviewComments(reviewId)` | `Comment[]` |
 | `submitPaperReview(reviewId, {overallComments, recommendation})` | `Review` |
 | `listPaperFeedback(paperId)` | `Review[]` (each with nested comments) |
+| `listAllFeedback()` | `Review[]` (every paper in the org, each with nested comments) |
 | `updateCommentStatus(commentId, status)` | `Comment` |
+| `listCommentHistory(commentId)` | `AuditLogEntry[]` |
 
 ---
 

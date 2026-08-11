@@ -8344,6 +8344,129 @@ const PapersPanel = ({ papers, onUpdate, onPublish, onCreateRevision, onDelete, 
   );
 };
 
+/* ─── FEEDBACK REPOSITORY PANEL ──────────────────────────────────────────
+   Centralized, cross-paper view of every practitioner comment in the org —
+   distinct from PapersPanel's per-paper "Practitioner Review" section,
+   which stays for quick access while working a specific paper. Both call
+   the same API.updateCommentStatus(), so status changes and their audit
+   trail are consistent regardless of which view made them. */
+const FeedbackRepositoryPanel = () => {
+  const toast = useToast();
+  const [loading, setLoading] = useState(true);
+  const [reviews, setReviews] = useState([]);
+  const [statusFilter, setStatusFilter] = useState("all");
+  const [historyFor, setHistoryFor] = useState(null); // commentId
+  const [history, setHistory] = useState([]);
+  const [historyLoading, setHistoryLoading] = useState(false);
+
+  const load = () => {
+    setLoading(true);
+    API.listAllFeedback().then(l=>setReviews(l||[])).catch(e=>{
+      toast.error(e.message||"Failed to load feedback");
+      setReviews([]);
+    }).finally(()=>setLoading(false));
+  };
+  useEffect(()=>{ load(); },[]);
+
+  // Flatten reviews → one row per comment, carrying the parent review's
+  // practitioner/paper/version/iteration context (feature #5's storage list).
+  const rows = reviews.flatMap(r => (r.paper_review_comments||[]).map(c => ({
+    comment: c, review: r,
+  }))).sort((a,b)=>new Date(b.comment.created_at)-new Date(a.comment.created_at));
+
+  const filtered = statusFilter==="all" ? rows : rows.filter(r=>r.comment.implementation_status===statusFilter);
+
+  const decide = async (commentId, status) => {
+    try{
+      await API.updateCommentStatus(commentId, status);
+      load();
+    }catch(e){ toast.error(e.message||"Failed to update comment"); }
+  };
+
+  const toggleHistory = async (commentId) => {
+    if(historyFor===commentId){ setHistoryFor(null); return; }
+    setHistoryFor(commentId);
+    setHistoryLoading(true);
+    try{ setHistory(await API.listCommentHistory(commentId)||[]); }
+    catch(e){ setHistory([]); }
+    finally{ setHistoryLoading(false); }
+  };
+
+  const STATUSES = [["all","All"],["pending","Pending"],["accepted","Accepted"],["rejected","Rejected"],["implemented","Implemented"]];
+  const fmtDate = (ts) => ts ? new Date(ts).toLocaleDateString("en-GB",{day:"2-digit",month:"short",year:"numeric",hour:"2-digit",minute:"2-digit"}) : "—";
+
+  return (
+    <div className="fade-in">
+      <SectionHeader title="Feedback Repository"
+        subtitle={`${rows.length} comment(s) across ${reviews.length} review(s) — every paper in your organisation`}/>
+
+      <div style={{display:"flex",gap:8,marginBottom:20}}>
+        {STATUSES.map(([id,label])=>(
+          <button key={id} onClick={()=>setStatusFilter(id)}
+            style={{padding:"7px 14px",borderRadius:6,fontSize:13,fontWeight:600,cursor:"pointer",
+              fontFamily:"inherit",border:`1px solid ${statusFilter===id?T.teal:T.border}`,
+              background:statusFilter===id?T.tealBg2:"transparent",color:statusFilter===id?T.teal:T.text2}}>
+            {label}
+          </button>
+        ))}
+      </div>
+
+      {loading?(
+        <div style={{textAlign:"center",padding:"60px 0",color:T.text3,fontSize:13}}>Loading…</div>
+      ):filtered.length===0?(
+        <div style={{textAlign:"center",padding:"60px 20px",border:`1px dashed ${T.border2}`,borderRadius:8}}>
+          <div style={{fontSize:32,marginBottom:12,opacity:0.3}}>💬</div>
+          <p style={{fontSize:13,color:T.text3}}>No {statusFilter==="all"?"":statusFilter} feedback yet.</p>
+        </div>
+      ):(
+        <div style={{display:"flex",flexDirection:"column",gap:10}}>
+          {filtered.map(({comment:c, review:r})=>(
+            <div key={c.id} style={{background:T.bg2,borderRadius:10,padding:16,border:`1px solid ${T.border}`}}>
+              <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:8}}>
+                <div>
+                  <div style={{fontSize:13,fontWeight:700,color:"#F0F6FF"}}>{r.papers?.title||"Untitled paper"}</div>
+                  <div style={{fontSize:11,color:T.text3}}>
+                    {r.papers?.compound||"—"} · {r.version_label||"—"} · iteration {r.iteration||1}
+                  </div>
+                </div>
+                <select value={c.implementation_status} onChange={e=>decide(c.id, e.target.value)}
+                  style={{fontSize:12,padding:"4px 10px"}}>
+                  {["pending","accepted","rejected","implemented"].map(s=><option key={s} value={s}>{s}</option>)}
+                </select>
+              </div>
+              <div style={{display:"flex",gap:8,alignItems:"center",marginBottom:8,fontSize:11,color:T.text3}}>
+                <span style={{color:T.teal}}>{r.reviewer_name||r.reviewer_email}</span>
+                <span>· {c.section_key||"General"}</span>
+                <Tag color={c.importance==="critical"?T.red:c.importance==="high"?T.amber:T.text3}>{c.importance}</Tag>
+                <span>· {fmtDate(c.created_at)}</span>
+              </div>
+              <div style={{fontSize:13,color:"#DCE6F5",marginBottom:8}}>{c.comment_text}</div>
+              <button onClick={()=>toggleHistory(c.id)}
+                style={{fontSize:11,color:T.text3,background:"none",border:"none",cursor:"pointer",
+                  fontFamily:"inherit",textDecoration:"underline"}}>
+                {historyFor===c.id?"Hide history":"View status history"}
+              </button>
+              {historyFor===c.id&&(
+                <div style={{marginTop:8,padding:10,background:T.bg3,borderRadius:6,border:`1px solid ${T.border}`}}>
+                  {historyLoading?(
+                    <div style={{fontSize:11,color:T.text3}}>Loading…</div>
+                  ):history.length===0?(
+                    <div style={{fontSize:11,color:T.text3}}>No status changes recorded yet.</div>
+                  ):history.map(h=>(
+                    <div key={h.id} style={{fontSize:11,color:T.text3,padding:"3px 0"}}>
+                      {fmtDate(h.created_at)} — {h.metadata?.from||"pending"} → {h.metadata?.to}
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+};
+
 
 
 const GenerationPanel = ({ outcomes, refs, compound, project, projectId, onBack, setPapers }) => {
@@ -14408,6 +14531,8 @@ export default function App(){
               <NavBtn id="papers" label="Papers"
                 badge={papers.length||null}
                 onClick={()=>setActiveTab("papers")}/>
+          <NavBtn id="feedback" label="Feedback Repository"
+            onClick={()=>setActiveTab("feedback")}/>
           <NavBtn id="compounds" label={`Compounds (${compounds.length})`}/>
           <NavBtn id="mcid"      label="MCID Library"/>
           <NavBtn id="template"  label="Paper Template"/>
@@ -14835,6 +14960,12 @@ export default function App(){
                       await API.generateAIDraft(project.id, { paperId });
                       await loadPapers(project.id);
                     }}/>
+                </div>
+              )}
+
+              {activeTab==="feedback"&&(
+                <div className="fade-in">
+                  <FeedbackRepositoryPanel/>
                 </div>
               )}
 
