@@ -692,6 +692,80 @@ export const adapter = {
     return check(data, error, 'listPrefaces');
   },
 
+  // ── AI COMMENT RECONCILIATION ────────────────────────────────────────────
+  // Two explicit, separate steps — analyze, then (after the researcher
+  // decides on each recommendation) apply — so no draft content changes
+  // until the researcher has actually reviewed the AI's suggestions.
+
+  async runCommentReconciliation(paperId, reviewCycleId) {
+    const orgId = await getOrgId();
+    const { data: { user } } = await supabase.auth.getUser();
+
+    const { data: job, error: jobErr } = await supabase
+      .from('ai_jobs')
+      .insert({
+        org_id: orgId, paper_id: paperId, job_type: 'reconciliation', status: 'pending',
+        input_ref: { reviewCycleId }, created_by: user.id,
+      })
+      .select().single();
+    check(job, jobErr, 'runCommentReconciliation/insert');
+
+    const { data: body, error } = await supabase.functions.invoke('ai-generate', {
+      headers: { Authorization: `Bearer ${supabaseKey}` },
+      body: { jobId: job.id },
+    });
+    if (error) throw new Error(error.message || 'AI comment reconciliation failed');
+    if (body?.error) throw new Error(body.error);
+    return { jobId: job.id, reconciliationId: body.reconciliationId };
+  },
+
+  async listReconciliations(paperId) {
+    const { data, error } = await supabase
+      .from('comment_reconciliations').select('*').eq('paper_id', paperId)
+      .order('created_at', { ascending: false });
+    return check(data, error, 'listReconciliations');
+  },
+
+  // Full traceability view: every comment's AI analysis + researcher
+  // decision + (once applied) which draft implemented it.
+  async getReconciliation(reconciliationId) {
+    const { data, error } = await supabase
+      .from('comment_change_map')
+      .select('*, paper_review_comments(section_key, comment_text, importance, review_id)')
+      .eq('reconciliation_id', reconciliationId)
+      .order('ai_category', { ascending: true });
+    return check(data, error, 'getReconciliation');
+  },
+
+  async decideOnRecommendation(mapId, decision) {
+    const { data, error } = await supabase.rpc('decide_on_recommendation', {
+      p_map_id: mapId, p_decision: decision,
+    });
+    return check(data, error, 'decideOnRecommendation');
+  },
+
+  async generateReconciledDraft(paperId, reconciliationId) {
+    const orgId = await getOrgId();
+    const { data: { user } } = await supabase.auth.getUser();
+
+    const { data: job, error: jobErr } = await supabase
+      .from('ai_jobs')
+      .insert({
+        org_id: orgId, paper_id: paperId, job_type: 'reconciliation_apply', status: 'pending',
+        input_ref: { reconciliationId }, created_by: user.id,
+      })
+      .select().single();
+    check(job, jobErr, 'generateReconciledDraft/insert');
+
+    const { data: body, error } = await supabase.functions.invoke('ai-generate', {
+      headers: { Authorization: `Bearer ${supabaseKey}` },
+      body: { jobId: job.id },
+    });
+    if (error) throw new Error(error.message || 'Failed to generate reconciled draft');
+    if (body?.error) throw new Error(body.error);
+    return { jobId: job.id, draftId: body.draftId };
+  },
+
   // ── CLINICAL STUDIES ─────────────────────────────────────────────────────
 
   async listStudies() {

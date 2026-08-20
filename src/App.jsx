@@ -7912,7 +7912,7 @@ const PAPER_SECTIONS = ["Abstract","Introduction","Methods","Results","Discussio
 
 /* ─── RICH TEXT EDITOR ───────────────────────────────────────────────── */
 
-const PapersPanel = ({ papers, onUpdate, onPublish, onCreateRevision, onDelete, onRestoreVersion, projectId, onGenerateAIDraft, onGeneratePreface }) => {
+const PapersPanel = ({ papers, onUpdate, onPublish, onCreateRevision, onDelete, onRestoreVersion, projectId, onGenerateAIDraft, onGeneratePreface, onGenerateReconciledDraft }) => {
   const [viewingId, setViewingId] = useState(null);
   const [generating, setGenerating] = useState(false);
   const [generatingPreface, setGeneratingPreface] = useState(false);
@@ -8019,6 +8019,59 @@ const PapersPanel = ({ papers, onUpdate, onPublish, onCreateRevision, onDelete, 
     if(paper?.groupId) loadPrefaces(paper.groupId); else setPrefaces([]);
     setExpandedPreface(null);
   },[viewingId]);
+
+  // ── AI comment reconciliation (feature #6) — analyze a closed review
+  // cycle's comments, then (after the researcher decides on each
+  // recommendation) generate the next draft from the accepted ones. ──
+  const [reconciliations, setReconciliations] = useState([]);
+  const [changeMap, setChangeMap] = useState([]);
+  const [analyzingFeedback, setAnalyzingFeedback] = useState(false);
+  const [applyingReconciliation, setApplyingReconciliation] = useState(false);
+
+  const latestReconciliation = reconciliations[0] || null;
+
+  const loadReconciliation = async (groupId) => {
+    const list = await API.listReconciliations(groupId).catch(()=>[]);
+    setReconciliations(list||[]);
+    if(list?.[0]) {
+      API.getReconciliation(list[0].id).then(l=>setChangeMap(l||[])).catch(()=>setChangeMap([]));
+    } else setChangeMap([]);
+  };
+
+  useEffect(()=>{
+    if(paper?.status!=="published"&&paper?.groupId) loadReconciliation(paper.groupId);
+    else { setReconciliations([]); setChangeMap([]); }
+  },[viewingId]);
+
+  const analyzeFeedback = async () => {
+    if(!currentCycle) return;
+    setAnalyzingFeedback(true);
+    try{
+      await API.runCommentReconciliation(paper.groupId, currentCycle.id);
+      toast.success("Feedback analyzed");
+      loadReconciliation(paper.groupId);
+    }catch(e){ toast.error(e.message||"Failed to analyze feedback"); }
+    finally{ setAnalyzingFeedback(false); }
+  };
+
+  const decideRecommendation = async (mapId, decision) => {
+    try{
+      await API.decideOnRecommendation(mapId, decision);
+      loadReconciliation(paper.groupId);
+    }catch(e){ toast.error(e.message||"Failed to record decision"); }
+  };
+
+  const applyReconciliation = async () => {
+    if(!latestReconciliation || !onGenerateReconciledDraft) return;
+    if(!confirm("Generate the next draft from every accepted recommendation? This creates a new draft — nothing is overwritten.")) return;
+    setApplyingReconciliation(true);
+    try{
+      await onGenerateReconciledDraft(paper.groupId, latestReconciliation.id);
+      toast.success("Next draft generated from accepted feedback");
+      loadReconciliation(paper.groupId);
+    }catch(e){ toast.error(e.message||"Failed to generate next draft"); }
+    finally{ setApplyingReconciliation(false); }
+  };
 
   // ── Post-publication validation (feature #10) — published papers only. ──
   const [validationReport, setValidationReport] = useState(null);
@@ -8245,6 +8298,78 @@ const PapersPanel = ({ papers, onUpdate, onPublish, onCreateRevision, onDelete, 
             <input ref={fileInputRef} type="file" accept=".doc,.docx,.pdf"
               onChange={handleUpload} style={{display:"none"}}/>
           </div>
+
+          {/* AI comment reconciliation (feature #6) — only meaningful once a
+              review cycle has been closed (there's a finished round of
+              feedback to analyze). Two explicit steps: analyze, then decide
+              per-comment, then generate the next draft from accepted ones. */}
+          {paper.status!=="published"&&currentCycle?.stage==="review_closed"&&(
+            <div style={{background:T.bg2,borderRadius:10,padding:16,border:`1px solid ${T.border}`,marginBottom:16}}>
+              <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:12}}>
+                <div style={{fontSize:10,color:T.teal,fontWeight:700,textTransform:"uppercase",letterSpacing:"0.06em"}}>
+                  AI Comment Reconciliation — Cycle {currentCycle.cycle_number}
+                </div>
+                <Btn onClick={analyzeFeedback} disabled={analyzingFeedback} style={{fontSize:12,padding:"6px 14px"}}>
+                  {analyzingFeedback?"Analyzing…":latestReconciliation?"🔄 Re-analyze":"🤖 Analyze Feedback"}
+                </Btn>
+              </div>
+
+              {!latestReconciliation?(
+                <div style={{fontSize:12,color:T.text3,fontStyle:"italic"}}>
+                  Not analyzed yet — click "Analyze Feedback" to have AI identify duplicates,
+                  conflicts, and recommend actions for this cycle's comments.
+                </div>
+              ):(
+                <>
+                  <div style={{display:"flex",gap:8,marginBottom:14,flexWrap:"wrap"}}>
+                    {Object.entries(latestReconciliation.summary||{}).map(([k,v])=>(
+                      <Tag key={k} color={T.text3}>{k.replace("_count","").replace("_"," ")}: {v}</Tag>
+                    ))}
+                  </div>
+                  <div style={{display:"flex",flexDirection:"column",gap:10,marginBottom:14}}>
+                    {changeMap.map(row=>(
+                      <div key={row.id} style={{background:T.bg3,borderRadius:8,padding:12,border:`1px solid ${T.border}`}}>
+                        <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:6}}>
+                          <div style={{display:"flex",gap:6,alignItems:"center"}}>
+                            <Tag color={
+                              row.ai_category==="duplicate"?T.text3:
+                              row.ai_category==="conflicting"?T.red:
+                              row.ai_category==="out_of_scope"?T.text3:T.teal
+                            }>{row.ai_category}</Tag>
+                            {row.ai_importance&&<Tag color={row.ai_importance==="critical"?T.red:row.ai_importance==="high"?T.amber:T.text3}>{row.ai_importance}</Tag>}
+                            {row.ai_recommended_action&&<Tag color={T.text3}>{row.ai_recommended_action.replace("_"," ")}</Tag>}
+                          </div>
+                          <Tag color={row.researcher_decision==="accepted"?T.green:row.researcher_decision==="rejected"?T.red:T.amber}>
+                            {row.researcher_decision||"pending"}
+                          </Tag>
+                        </div>
+                        <div style={{fontSize:11,color:T.text3,marginBottom:4}}>{row.paper_review_comments?.section_key||"General"}</div>
+                        <div style={{fontSize:12,color:"#DCE6F5",marginBottom:6}}>{row.paper_review_comments?.comment_text}</div>
+                        {row.ai_recommendation&&(
+                          <div style={{fontSize:12,color:T.text2,fontStyle:"italic",marginBottom:8}}>AI: {row.ai_recommendation}</div>
+                        )}
+                        {!row.implemented_in_draft_id&&(
+                          <div style={{display:"flex",gap:6}}>
+                            <Btn variant="secondary" onClick={()=>decideRecommendation(row.id,"accepted")} style={{fontSize:11,padding:"4px 10px"}}>Accept</Btn>
+                            <Btn variant="secondary" onClick={()=>decideRecommendation(row.id,"rejected")} style={{fontSize:11,padding:"4px 10px"}}>Reject</Btn>
+                            <Btn variant="secondary" onClick={()=>decideRecommendation(row.id,"deferred")} style={{fontSize:11,padding:"4px 10px"}}>Defer</Btn>
+                          </div>
+                        )}
+                        {row.implemented_in_draft_id&&(
+                          <div style={{fontSize:11,color:T.green}}>✓ Implemented in a generated draft</div>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                  {changeMap.some(r=>r.researcher_decision==="accepted"&&!r.implemented_in_draft_id)&&onGenerateReconciledDraft&&(
+                    <Btn onClick={applyReconciliation} disabled={applyingReconciliation} style={{width:"100%",padding:"11px",fontSize:13,fontWeight:700}}>
+                      {applyingReconciliation?"Generating…":"✨ Generate Next Draft From Accepted Feedback"}
+                    </Btn>
+                  )}
+                </>
+              )}
+            </div>
+          )}
 
           {/* Preface — generated before the draft (feature #3), independent
               regeneration afterwards ("whenever major revisions happen"). */}
@@ -15425,6 +15550,10 @@ export default function App(){
                       if (!project?.id) throw new Error("Select a project first");
                       const result = await API.generatePreface(project.id, { paperId });
                       return result;
+                    }}
+                    onGenerateReconciledDraft={async (paperId, reconciliationId) => {
+                      await API.generateReconciledDraft(paperId, reconciliationId);
+                      await loadPapers(project?.id || null);
                     }}
                     onRestoreVersion={async (versionId) => {
                       try {

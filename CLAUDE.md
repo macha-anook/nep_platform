@@ -125,6 +125,11 @@ Every adapter (Mock, Supabase, REST) must implement these 20 methods.
 | `pollAIJob(jobId)` | `AiJob \| null` |
 | `generatePreface(projectId, {paperId?})` | `{jobId, paperId, prefaceId}` |
 | `listPrefaces(paperId)` | `Preface[]` |
+| `runCommentReconciliation(paperId, reviewCycleId)` | `{jobId, reconciliationId}` |
+| `listReconciliations(paperId)` | `Reconciliation[]` |
+| `getReconciliation(reconciliationId)` | `ChangeMapRow[]` (each with nested comment) |
+| `decideOnRecommendation(mapId, decision)` | `ChangeMapRow` |
+| `generateReconciledDraft(paperId, reconciliationId)` | `{jobId, draftId}` |
 | `inviteReviewer(paperId, {email, name})` | `{success, emailId, token}` |
 | `listReviewInvitations(paperId)` | `ReviewInvitation[]` |
 | `validateReviewInviteToken(paperId, token)` | `{valid, invite_id?, practitioner_email?, paper_title?, expires_at?}` |
