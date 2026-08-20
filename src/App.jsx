@@ -7912,12 +7912,15 @@ const PAPER_SECTIONS = ["Abstract","Introduction","Methods","Results","Discussio
 
 /* ─── RICH TEXT EDITOR ───────────────────────────────────────────────── */
 
-const PapersPanel = ({ papers, onUpdate, onPublish, onCreateRevision, onDelete, onRestoreVersion, projectId, onGenerateAIDraft }) => {
+const PapersPanel = ({ papers, onUpdate, onPublish, onCreateRevision, onDelete, onRestoreVersion, projectId, onGenerateAIDraft, onGeneratePreface }) => {
   const [viewingId, setViewingId] = useState(null);
   const [generating, setGenerating] = useState(false);
+  const [generatingPreface, setGeneratingPreface] = useState(false);
   const [showCompare, setShowCompare] = useState(false);
   const [compareA, setCompareA] = useState(null);
   const [compareB, setCompareB] = useState(null);
+  const [prefaces, setPrefaces] = useState([]);
+  const [expandedPreface, setExpandedPreface] = useState(null);
   const fileInputRef = useRef(null);
   const toast = useToast();
   const paper = papers.find(p=>p.id===viewingId);
@@ -7930,6 +7933,48 @@ const PapersPanel = ({ papers, onUpdate, onPublish, onCreateRevision, onDelete, 
     try{
       await onGenerateAIDraft(paperIdArg||null);
       toast.success(paperIdArg?"AI draft regenerated":"AI draft generated");
+    }catch(e){ toast.error(e.message||"AI draft generation failed"); }
+    finally{ setGenerating(false); }
+  };
+
+  const loadPrefaces = (groupId) => {
+    API.listPrefaces(groupId).then(l=>setPrefaces(l||[])).catch(()=>setPrefaces([]));
+  };
+
+  // Standalone regenerate — only used from the detail view of a paper that
+  // already has a preface (and therefore already went through the ordered
+  // start-new-paper flow below at some point). Feature #3: "Regenerate
+  // preface whenever major revisions happen."
+  const runGeneratePreface = async (paperIdArg) => {
+    if(!projectId || !onGeneratePreface || generatingPreface) return;
+    setGeneratingPreface(true);
+    try{
+      const result = await onGeneratePreface(paperIdArg||null);
+      toast.success("Preface regenerated");
+      if(paperIdArg) loadPrefaces(paperIdArg);
+      return result;
+    }catch(e){ toast.error(e.message||"Preface generation failed"); }
+    finally{ setGeneratingPreface(false); }
+  };
+
+  // The only entry point for a brand-new AI-assisted paper — preface THEN
+  // draft, always in that order (feature #3: "Generate preface before draft
+  // generation"), so there's no way to skip straight to a draft with no
+  // preface. Once this paper exists, its detail view offers independent
+  // "Regenerate Preface" / "Regenerate with AI" actions.
+  const runStartAIPaper = async () => {
+    if(!projectId || !onGeneratePreface || !onGenerateAIDraft || generating || generatingPreface) return;
+    setGeneratingPreface(true);
+    let prefaceResult;
+    try{
+      prefaceResult = await onGeneratePreface(null);
+      toast.success("Preface generated");
+    }catch(e){ toast.error(e.message||"Preface generation failed"); setGeneratingPreface(false); return; }
+    setGeneratingPreface(false);
+    setGenerating(true);
+    try{
+      await onGenerateAIDraft(prefaceResult.paperId);
+      toast.success("AI draft generated");
     }catch(e){ toast.error(e.message||"AI draft generation failed"); }
     finally{ setGenerating(false); }
   };
@@ -7971,6 +8016,8 @@ const PapersPanel = ({ papers, onUpdate, onPublish, onCreateRevision, onDelete, 
     else { setReviewInvitations([]); setPaperFeedback([]); setReviewCycles([]); }
     setInviteForm({email:"", name:""});
     setShowCompare(false); setCompareA(null); setCompareB(null);
+    if(paper?.groupId) loadPrefaces(paper.groupId); else setPrefaces([]);
+    setExpandedPreface(null);
   },[viewingId]);
 
   // ── Post-publication validation (feature #10) — published papers only. ──
@@ -8198,6 +8245,53 @@ const PapersPanel = ({ papers, onUpdate, onPublish, onCreateRevision, onDelete, 
             <input ref={fileInputRef} type="file" accept=".doc,.docx,.pdf"
               onChange={handleUpload} style={{display:"none"}}/>
           </div>
+
+          {/* Preface — generated before the draft (feature #3), independent
+              regeneration afterwards ("whenever major revisions happen"). */}
+          {paper.status!=="published"&&(prefaces.length>0||onGeneratePreface)&&(
+            <div style={{background:T.bg3,borderRadius:8,padding:16,border:`1px solid ${T.border}`,marginBottom:16}}>
+              <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:10}}>
+                <div style={{fontSize:10,color:T.teal,fontWeight:700,textTransform:"uppercase",letterSpacing:"0.06em"}}>
+                  Preface / Executive Summary
+                </div>
+                {projectId&&onGeneratePreface&&(
+                  <button onClick={()=>runGeneratePreface(paper.groupId)} disabled={generatingPreface}
+                    style={{fontSize:12,color:T.teal,background:"none",border:`1px solid ${T.teal}40`,
+                      borderRadius:6,padding:"6px 14px",cursor:generatingPreface?"not-allowed":"pointer",
+                      fontFamily:"inherit",opacity:generatingPreface?0.6:1}}>
+                    {generatingPreface?"Regenerating…":prefaces.length?"🔄 Regenerate Preface":"📝 Generate Preface"}
+                  </button>
+                )}
+              </div>
+              {prefaces.length===0?(
+                <div style={{fontSize:12,color:T.text3,fontStyle:"italic"}}>No preface generated yet.</div>
+              ):(()=>{
+                const latest = prefaces[0];
+                const fields = [
+                  ["overview","Overview"],["problem_statement","Problem Statement"],["motivation","Motivation"],
+                  ["objectives","Objectives"],["scope","Scope"],["methodology","Methodology"],
+                  ["expected_contributions","Expected Contributions"],["reviewer_guidance","Reviewer Guidance"],
+                ];
+                return (
+                  <div>
+                    {prefaces.length>1&&(
+                      <div style={{display:"flex",flexWrap:"wrap",gap:6,marginBottom:10}}>
+                        {prefaces.map(p=>(
+                          <Tag key={p.id} color={p.id===latest.id?T.teal:T.text3}>v{p.version_number}</Tag>
+                        ))}
+                      </div>
+                    )}
+                    {fields.map(([key,label])=>latest.content?.[key]&&(
+                      <div key={key} style={{marginBottom:10}}>
+                        <div style={{fontSize:11,color:T.text3,fontWeight:600,marginBottom:2}}>{label}</div>
+                        <div style={{fontSize:13,color:"#DCE6F5",lineHeight:1.5}}>{latest.content[key]}</div>
+                      </div>
+                    ))}
+                  </div>
+                );
+              })()}
+            </div>
+          )}
 
           {/* AI-generated draft preview — the html_content produced by the AI
               draft assistant, shown until a .docx is uploaded over it. */}
@@ -8429,14 +8523,14 @@ const PapersPanel = ({ papers, onUpdate, onPublish, onCreateRevision, onDelete, 
     <div className="fade-in">
       <SectionHeader title="Papers"
         subtitle={`${papers.length} paper(s) · ${published.length} published · ${inProgress.length} in progress`}
-        action={onGenerateAIDraft&&(
+        action={onGenerateAIDraft&&onGeneratePreface&&(
           projectId?(
-            <Btn onClick={()=>runAIGenerate(null)} disabled={generating}>
-              {generating?"Generating…":"✨ Generate AI Draft"}
+            <Btn onClick={runStartAIPaper} disabled={generating||generatingPreface}>
+              {generatingPreface?"Generating preface…":generating?"Generating draft…":"✨ Start New AI-Assisted Paper"}
             </Btn>
           ):(
-            <Tooltip text="Open a project first — the AI draft needs its compound, outcomes and references.">
-              <Btn disabled style={{opacity:0.5,cursor:"not-allowed"}}>✨ Generate AI Draft</Btn>
+            <Tooltip text="Open a project first — AI generation needs its compound, outcomes and references.">
+              <Btn disabled style={{opacity:0.5,cursor:"not-allowed"}}>✨ Start New AI-Assisted Paper</Btn>
             </Tooltip>
           )
         )}/>
@@ -15326,6 +15420,11 @@ export default function App(){
                       if (!project?.id) throw new Error("Select a project first");
                       await API.generateAIDraft(project.id, { paperId });
                       await loadPapers(project.id);
+                    }}
+                    onGeneratePreface={async (paperId) => {
+                      if (!project?.id) throw new Error("Select a project first");
+                      const result = await API.generatePreface(project.id, { paperId });
+                      return result;
                     }}
                     onRestoreVersion={async (versionId) => {
                       try {

@@ -657,6 +657,41 @@ export const adapter = {
     return data;
   },
 
+  // Feature #3 — independent of draft generation (not gated on one existing),
+  // but the ai-generate job it triggers links itself to whatever draft/
+  // version already exists for the paper, if any.
+  async generatePreface(projectId, opts = {}) {
+    const orgId = await getOrgId();
+    const { data: { user } } = await supabase.auth.getUser();
+    const { paperId = null } = opts;
+
+    const { data: job, error: jobErr } = await supabase
+      .from('ai_jobs')
+      .insert({
+        org_id: orgId, project_id: projectId, paper_id: paperId,
+        job_type: 'preface', status: 'pending',
+        input_ref: { paperId },
+        created_by: user.id,
+      })
+      .select().single();
+    check(job, jobErr, 'generatePreface/insert');
+
+    const { data: body, error } = await supabase.functions.invoke('ai-generate', {
+      headers: { Authorization: `Bearer ${supabaseKey}` },
+      body: { jobId: job.id },
+    });
+    if (error) throw new Error(error.message || 'AI preface generation failed');
+    if (body?.error) throw new Error(body.error);
+    return { jobId: job.id, paperId: body.paperId, prefaceId: body.prefaceId };
+  },
+
+  async listPrefaces(paperId) {
+    const { data, error } = await supabase
+      .from('paper_prefaces').select('*').eq('paper_id', paperId)
+      .order('version_number', { ascending: false });
+    return check(data, error, 'listPrefaces');
+  },
+
   // ── CLINICAL STUDIES ─────────────────────────────────────────────────────
 
   async listStudies() {
