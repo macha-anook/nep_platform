@@ -8063,12 +8063,15 @@ const PapersPanel = ({ papers, onUpdate, onPublish, onCreateRevision, onDelete, 
 
   const applyReconciliation = async () => {
     if(!latestReconciliation || !onGenerateReconciledDraft) return;
-    if(!confirm("Generate the next draft from every accepted recommendation? This creates a new draft — nothing is overwritten.")) return;
+    if(!confirm("Generate the next draft from every accepted recommendation? This creates a new draft — nothing is overwritten. The preface will also regenerate automatically to match.")) return;
     setApplyingReconciliation(true);
     try{
-      await onGenerateReconciledDraft(paper.groupId, latestReconciliation.id);
-      toast.success("Next draft generated from accepted feedback");
+      const result = await onGenerateReconciledDraft(paper.groupId, latestReconciliation.id);
+      toast.success(result?.prefaceId
+        ? "Next draft generated from accepted feedback — preface regenerated to match"
+        : "Next draft generated from accepted feedback");
       loadReconciliation(paper.groupId);
+      loadPrefaces(paper.groupId);
     }catch(e){ toast.error(e.message||"Failed to generate next draft"); }
     finally{ setApplyingReconciliation(false); }
   };
@@ -15552,8 +15555,9 @@ export default function App(){
                       return result;
                     }}
                     onGenerateReconciledDraft={async (paperId, reconciliationId) => {
-                      await API.generateReconciledDraft(paperId, reconciliationId);
+                      const result = await API.generateReconciledDraft(paperId, reconciliationId);
                       await loadPapers(project?.id || null);
+                      return result;
                     }}
                     onRestoreVersion={async (versionId) => {
                       try {

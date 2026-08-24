@@ -763,7 +763,10 @@ export const adapter = {
     });
     if (error) throw new Error(error.message || 'Failed to generate reconciled draft');
     if (body?.error) throw new Error(body.error);
-    return { jobId: job.id, draftId: body.draftId };
+    // prefaceId is set when the paper had a project to regenerate the
+    // preface against (feature #3: auto-regenerate "whenever major
+    // revisions happen") — null if that best-effort step didn't run/failed.
+    return { jobId: job.id, draftId: body.draftId, prefaceId: body.prefaceId || null };
   },
 
   // ── CLINICAL STUDIES ─────────────────────────────────────────────────────

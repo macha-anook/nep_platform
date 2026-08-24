@@ -452,14 +452,42 @@ async function handleReconciliationApply(adminClient, anthropicKey, job, jobId) 
 
   await adminClient.from("comment_reconciliations").update({ applied_draft_id: newDraft.id }).eq("id", reconciliationId);
 
+  // Feature #3: "regenerate preface whenever major revisions happen" — a
+  // draft produced from accepted reconciliation feedback is the clearest
+  // such event in this system, so it's triggered automatically here rather
+  // than left as a manual-only action. Best-effort: a failure here must not
+  // fail the reconciliation-apply job, since the new draft already
+  // succeeded and is the primary deliverable.
+  let prefaceId = null;
+  try {
+    const { data: paperRow } = await adminClient
+      .from("papers").select("project_id").eq("id", job.paper_id).single();
+    if (paperRow?.project_id) {
+      const { data: prefaceJob, error: prefaceJobErr } = await adminClient
+        .from("ai_jobs")
+        .insert({
+          org_id: job.org_id, project_id: paperRow.project_id, paper_id: job.paper_id,
+          job_type: "preface", status: "running", stage: 1, pct: 10,
+          input_ref: { paperId: job.paper_id, triggeredBy: "reconciliation_apply", triggeringJobId: jobId },
+          created_by: job.created_by,
+        })
+        .select().single();
+      if (prefaceJobErr) throw new Error(prefaceJobErr.message);
+      const prefaceResult = await handlePreface(adminClient, anthropicKey, prefaceJob, prefaceJob.id);
+      prefaceId = prefaceResult.prefaceId;
+    }
+  } catch (e) {
+    console.error("[ai-generate] auto preface regeneration after reconciliation failed", e);
+  }
+
   await adminClient.from("ai_jobs").update({
     status: "done", stage: 3, pct: 100,
     model: ANTHROPIC_MODEL, prompt_version: PROMPT_VERSION_RECONCILE_APPLY,
-    output_ref: { draftId: newDraft.id },
+    output_ref: { draftId: newDraft.id, prefaceId },
     completed_at: new Date().toISOString(),
   }).eq("id", jobId);
 
-  return { success: true, draftId: newDraft.id, paperId: job.paper_id };
+  return { success: true, draftId: newDraft.id, paperId: job.paper_id, prefaceId };
 }
 
 serve(async (req: Request) => {
