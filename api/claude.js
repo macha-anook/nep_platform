@@ -25,13 +25,19 @@ export default async function handler(req, res) {
         "x-api-key": apiKey,
       },
       body: JSON.stringify({
-        model: body.model || "claude-sonnet-4-20250514",
+        model: body.model || process.env.ANTHROPIC_MODEL || "claude-sonnet-5",
         max_tokens: body.max_tokens || 500,
         messages: body.messages,
       }),
     });
 
     const data = await response.json();
+    if (response.status === 400 && /model:/i.test(data?.error?.message || "")) {
+      res.status(400).json({
+        error: `${data.error.message} — check console.anthropic.com for models available to this API key, then update ANTHROPIC_MODEL.`,
+      });
+      return;
+    }
     res.status(response.status).json(data);
   } catch (err) {
     res.status(500).json({ error: err.message });

@@ -23,7 +23,19 @@ import { serve }         from "https://deno.land/std@0.168.0/http/server.ts";
 import { createClient }  from "https://esm.sh/@supabase/supabase-js@2";
 import { corsHeaders }   from "../_shared/cors.ts";
 
-const ANTHROPIC_MODEL = "claude-sonnet-4-20250514"; // matches api/claude.js
+// Configurable via the ANTHROPIC_MODEL Supabase secret so a retired/
+// unavailable model can be swapped without a code change + redeploy.
+const ANTHROPIC_MODEL = Deno.env.get("ANTHROPIC_MODEL") || "claude-sonnet-5";
+
+function anthropicErrorMessage(data) {
+  const msg = data?.error?.message || "Anthropic API error";
+  if (/^model:/i.test(msg)) {
+    return `${msg} — check console.anthropic.com for models available to this API key, ` +
+      `then update the ANTHROPIC_MODEL Supabase secret.`;
+  }
+  return msg;
+}
+
 const PROMPT_VERSION_DRAFT = "draft-sections-v1";
 const PROMPT_VERSION_PREFACE = "preface-v1";
 const PROMPT_VERSION_RECONCILE = "reconciliation-v1";
@@ -122,7 +134,7 @@ async function callClaude(anthropicKey, sections, contextText, strict) {
     }),
   });
   const data = await res.json();
-  if (!res.ok) throw new Error(data?.error?.message || "Anthropic API error");
+  if (!res.ok) throw new Error(anthropicErrorMessage(data));
   return (data.content || []).map(b => b.text || "").join("\n").trim();
 }
 
@@ -160,7 +172,7 @@ async function callClaudeForJson(anthropicKey, systemPrompt, userContent, maxTok
     }),
   });
   const data = await res.json();
-  if (!res.ok) throw new Error(data?.error?.message || "Anthropic API error");
+  if (!res.ok) throw new Error(anthropicErrorMessage(data));
   const raw = (data.content || []).map(b => b.text || "").join("\n").trim();
 
   // Models sometimes wrap JSON in a code fence despite instructions not to —
@@ -420,7 +432,7 @@ async function handleReconciliationApply(adminClient, anthropicKey, job, jobId) 
     }),
   });
   const data = await res.json();
-  if (!res.ok) throw new Error(data?.error?.message || "Anthropic API error");
+  if (!res.ok) throw new Error(anthropicErrorMessage(data));
   const html = (data.content || []).map(b => b.text || "").join("\n").trim();
   const { cleaned } = stripDisallowedSections(html);
 
