@@ -8963,9 +8963,14 @@ const GenerationPanel = ({ outcomes, refs, compound, project, projectId, onBack,
               if(idx>=0){const n=[...prev];n[idx]=saved;return n;}
               return [...prev,saved];
             });
-          }catch(ex){console.warn("[Paper save]",ex);}
+          }catch(ex){
+            console.warn("[Paper save]",ex);
+            toast.error("Draft generated but could not be saved — download it now to avoid losing it");
+          }
         };
         reader.readAsDataURL(blob);
+      } else if(!projectId){
+        toast.error("No study selected — draft was not saved. Download it now to avoid losing it");
       }
     }catch(e){
       setStatus("error");
@@ -9854,19 +9859,25 @@ const NewProjectModal = ({ onClose, onCreate, existingProjects }) => {
   const handleCreate = async () => {
     if(!name.trim()){ setError("Study name is required"); return; }
     setCreating(true);
+    setError("");
     const filled   = team.filter(m=>m.name.trim());
     const lead     = filled[0]?.name||"";
     const coAuth   = filled.slice(1).map(m=>m.name).filter(Boolean).join(", ");
     const projectId= `NEP-${String(existingProjects.length+1).padStart(3,"0")}`;
-    await onCreate({
-      name: name.trim(),
-      project_id: projectId,
-      researcher: lead,
-      co_authors: coAuth,
-      research_team: filled,
-    });
-    setCreating(false);
-    onClose();
+    try{
+      await onCreate({
+        name: name.trim(),
+        project_id: projectId,
+        researcher: lead,
+        co_authors: coAuth,
+        research_team: filled,
+      });
+      onClose();
+    }catch(e){
+      setError(e?.message||"Failed to create study — please retry");
+    }finally{
+      setCreating(false);
+    }
   };
 
   return (
@@ -14762,6 +14773,31 @@ export default function App(){
     }
   },[user]);
 
+  // The sidebar "Studies" list is built from clinical-study/patient data
+  // (compound names) — it has no DB `project` row of its own. Generation,
+  // autosave and refs/outcomes all require a real `project.id`, so make
+  // sure one exists (matched by compound_id, or auto-created) whenever the
+  // selected compound changes.
+  useEffect(()=>{
+    if(activeTab!=="studies" || !activeCompound || !user || user.role==="doctor") return;
+    if(project?.compound_id===activeCompound) return;
+    (async()=>{
+      try{
+        let match=projects.find(p=>p.compound_id===activeCompound);
+        if(!match){
+          match=await API.createProject({
+            name:`${activeCompound} Evidence Synthesis`,
+            compound_id:activeCompound,
+          });
+          setProjects(prev=>[...prev,match]);
+        }
+        await loadProject(match);
+      }catch(e){
+        toast.error("Failed to load study project: "+(e.message||""));
+      }
+    })();
+  },[activeTab,activeCompound,user]);
+
   /* Load a project */
   const loadProject=async(proj)=>{
     setProject(proj); setLoading(true);
@@ -14806,9 +14842,10 @@ export default function App(){
     setSaving(true);
     saveTimer.current=setTimeout(async()=>{
       try{
-        if(type==="outcomes") await API.saveOutcomes(project?.id||"_default",data);
-        if(type==="refs") await API.saveRefs(project?.id||"_default",data);
-      }catch(e){}
+        if(!project?.id){ setSaving(false); return; }
+        if(type==="outcomes") await API.saveOutcomes(project.id,data);
+        if(type==="refs") await API.saveRefs(project.id,data);
+      }catch(e){ toast.error("Failed to save — please retry"); }
       setSaving(false);
     },1500);
   };

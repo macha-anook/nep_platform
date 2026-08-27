@@ -31,6 +31,18 @@ function check(data, error, label) {
   return data;
 }
 
+// Real columns on the `projects` table. Callers pass UI-only fields
+// (notes, prognosis, compound_name, team, journal, a display project_id
+// code, ...) that PostgREST rejects with PGRST204 if forwarded as-is.
+const PROJECT_COLUMNS = ['name', 'compound_id', 'target_journal', 'paper_title',
+  'keywords', 'researcher', 'affiliation', 'co_authors', 'research_team',
+  'framework_version', 'status'];
+function pickProjectColumns(obj) {
+  const out = {};
+  PROJECT_COLUMNS.forEach(k => { if (k in obj) out[k] = obj[k]; });
+  return out;
+}
+
 // Centralized new-vs-existing check, shared by both auth entry points
 // (email OTP verification and the Google OAuth session resolved after
 // redirect). A user profile row is created for every signup (trigger
@@ -392,7 +404,7 @@ export const adapter = {
     const { data: { user } } = await supabase.auth.getUser();
     const { data, error } = await supabase
       .from('projects')
-      .insert({ ...proj, org_id: orgId, created_by: user.id })
+      .insert({ ...pickProjectColumns(proj), org_id: orgId, created_by: user.id })
       .select()
       .single();
     return check(data, error, 'createProject');
@@ -400,8 +412,9 @@ export const adapter = {
 
   async updateProject(idOrObj, updates) {
     const id = typeof idOrObj === 'object' ? idOrObj.id : idOrObj;
-    const payload = typeof idOrObj === 'object' ? { ...idOrObj } : { ...updates };
-    delete payload.id;
+    if (!id) throw new Error('[updateProject] missing project id');
+    const raw = typeof idOrObj === 'object' ? idOrObj : (updates || {});
+    const payload = pickProjectColumns(raw);
     const { data, error } = await supabase
       .from('projects')
       .update(payload)

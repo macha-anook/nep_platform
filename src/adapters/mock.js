@@ -96,9 +96,11 @@ export const adapter = {
     STORE.projects.push(p);
     return p;
   },
-  async updateProject(id, data) {
+  async updateProject(idOrObj, data) {
     await delay(250);
-    STORE.projects = STORE.projects.map(p => p.id === id ? { ...p, ...data } : p);
+    const id = typeof idOrObj === 'object' ? idOrObj.id : idOrObj;
+    const updates = typeof idOrObj === 'object' ? idOrObj : data;
+    STORE.projects = STORE.projects.map(p => p.id === id ? { ...p, ...updates } : p);
     return STORE.projects.find(p => p.id === id);
   },
   async deleteProject(id) {
