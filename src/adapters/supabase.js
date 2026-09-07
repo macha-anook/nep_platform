@@ -1057,6 +1057,13 @@ export const adapter = {
     try { await supabase.rpc('advance_review_cycle_on_publish', { p_paper_id: version.paper_id }); }
     catch (e) { console.warn('[advance_review_cycle_on_publish]', e.message); }
 
+    // Feature #10: "After final research paper generation: Automatically
+    // invite same practitioners for validation." Best-effort — a paper
+    // that was never sent for practitioner review (no paper_review_invitations
+    // rows yet) has no one to re-invite, and that's not a publish failure.
+    try { await this.invitePostPublicationValidation(version.paper_id); }
+    catch (e) { console.warn('[invitePostPublicationValidation]', e.message); }
+
     const { data: paper } = await supabase
       .from('papers').select('*').eq('id', version.paper_id).single();
     return this._normVersion(version, paper);
@@ -1498,5 +1505,23 @@ export const adapter = {
       .from('post_publication_report').select('*').eq('paper_id', paperId).maybeSingle();
     if (error) { console.warn('[getPostPublicationReport]', error.message); return null; }
     return data;
+  },
+
+  // The researcher-facing "separate post-publication feedback repository"
+  // itself (feature #10) — the actual submitted content per practitioner,
+  // not just the aggregate counts getPostPublicationReport returns. Scoped
+  // to the caller's org via the existing ppv_org_all RLS policy.
+  async listPostPublicationValidations(paperId) {
+    const { data, error } = await supabase
+      .from('post_publication_validations').select('*')
+      .eq('paper_id', paperId).order('invited_at', { ascending: false });
+    if (error) { console.warn('[listPostPublicationValidations]', error.message); return []; }
+    return (data || []).map(v => ({
+      id: v.id, practitionerEmail: v.practitioner_email, practitionerName: v.practitioner_name,
+      status: v.status,
+      findingValidation: v.finding_validation, practicalApplicability: v.practical_applicability,
+      recommendations: v.recommendations, futureResearchSuggestions: v.future_research_suggestions,
+      invitedAt: v.invited_at, submittedAt: v.submitted_at,
+    }));
   },
 };
