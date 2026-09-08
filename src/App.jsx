@@ -8886,6 +8886,84 @@ const FeedbackRepositoryPanel = () => {
   );
 };
 
+/* ─── NOTIFICATIONS PANEL (feature #8: "maintain notification history") ──
+   Every transactional email the org has sent — registration ack/decision,
+   review-submitted, validation-submitted — in one browsable, filterable
+   place. Closes the gap where notifications were logged to the DB but
+   never actually visible in the app. */
+const NotificationsPanel = () => {
+  const toast = useToast();
+  const [loading, setLoading] = useState(true);
+  const [notifications, setNotifications] = useState([]);
+  const [typeFilter, setTypeFilter] = useState("all");
+
+  const load = () => {
+    setLoading(true);
+    API.listNotifications(typeFilter==="all"?undefined:typeFilter)
+      .then(l=>setNotifications(l||[]))
+      .catch(e=>{ toast.error(e.message||"Failed to load notifications"); setNotifications([]); })
+      .finally(()=>setLoading(false));
+  };
+  useEffect(()=>{ load(); },[typeFilter]);
+
+  const TYPES = [
+    ["all","All"],
+    ["registration_ack","Registration Ack"],
+    ["registration_decision","Registration Decision"],
+    ["review_submitted","Review Submitted"],
+    ["validation_submitted","Validation Submitted"],
+  ];
+  const TYPE_LABELS = Object.fromEntries(TYPES);
+  const fmtDate = (ts) => ts ? new Date(ts).toLocaleDateString("en-GB",{day:"2-digit",month:"short",year:"numeric",hour:"2-digit",minute:"2-digit"}) : "—";
+
+  return (
+    <div className="fade-in">
+      <SectionHeader title="Notifications" subtitle={`${notifications.length} email(s) sent`}/>
+
+      <div style={{display:"flex",gap:8,marginBottom:20,flexWrap:"wrap"}}>
+        {TYPES.map(([id,label])=>(
+          <button key={id} onClick={()=>setTypeFilter(id)}
+            style={{padding:"7px 14px",borderRadius:6,fontSize:13,fontWeight:600,cursor:"pointer",
+              fontFamily:"inherit",border:`1px solid ${typeFilter===id?T.teal:T.border}`,
+              background:typeFilter===id?T.tealBg2:"transparent",color:typeFilter===id?T.teal:T.text2}}>
+            {label}
+          </button>
+        ))}
+      </div>
+
+      {loading?(
+        <div style={{textAlign:"center",padding:"60px 0",color:T.text3,fontSize:13}}>Loading…</div>
+      ):notifications.length===0?(
+        <div style={{textAlign:"center",padding:"60px 20px",border:`1px dashed ${T.border2}`,borderRadius:8}}>
+          <div style={{fontSize:32,marginBottom:12,opacity:0.3}}>✉️</div>
+          <p style={{fontSize:13,color:T.text3}}>No {typeFilter==="all"?"":TYPE_LABELS[typeFilter]+" "}notifications yet.</p>
+        </div>
+      ):(
+        <div style={{display:"flex",flexDirection:"column",gap:8}}>
+          {notifications.map(n=>(
+            <div key={n.id} style={{background:T.bg2,borderRadius:10,padding:14,border:`1px solid ${T.border}`}}>
+              <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:6}}>
+                <div>
+                  <div style={{fontSize:13,fontWeight:600,color:"#F0F6FF"}}>{n.subject||TYPE_LABELS[n.type]||n.type}</div>
+                  <div style={{fontSize:11,color:T.text3}}>To {n.recipient_email} · {fmtDate(n.created_at)}</div>
+                </div>
+                <div style={{display:"flex",gap:6,alignItems:"center",flexShrink:0,marginLeft:8}}>
+                  <Tag color={T.text3}>{TYPE_LABELS[n.type]||n.type}</Tag>
+                  <Tag color={n.status==="sent"?T.green:T.red}>{n.status}</Tag>
+                </div>
+              </div>
+              {n.payload&&Object.keys(n.payload).length>0&&(
+                <div style={{fontSize:11,color:T.text3,marginTop:4}}>
+                  {Object.entries(n.payload).map(([k,v])=>`${k}: ${Array.isArray(v)?v.join(", "):v}`).join(" · ")}
+                </div>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+};
 
 
 const GenerationPanel = ({ outcomes, refs, compound, project, projectId, onBack, setPapers }) => {
@@ -15214,6 +15292,8 @@ export default function App(){
                 onClick={()=>setActiveTab("papers")}/>
           <NavBtn id="feedback" label="Feedback Repository"
             onClick={()=>setActiveTab("feedback")}/>
+          <NavBtn id="notifications" label="Notifications"
+            onClick={()=>setActiveTab("notifications")}/>
           <NavBtn id="compounds" label={`Compounds (${compounds.length})`}/>
           <NavBtn id="mcid"      label="MCID Library"/>
           <NavBtn id="template"  label="Paper Template"/>
@@ -15673,6 +15753,12 @@ export default function App(){
               {activeTab==="feedback"&&(
                 <div className="fade-in">
                   <FeedbackRepositoryPanel/>
+                </div>
+              )}
+
+              {activeTab==="notifications"&&(
+                <div className="fade-in">
+                  <NotificationsPanel/>
                 </div>
               )}
 
