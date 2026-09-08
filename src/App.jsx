@@ -8092,12 +8092,19 @@ const PapersPanel = ({ papers, onUpdate, onPublish, onCreateRevision, onDelete, 
 
   // ── Post-publication validation (feature #10) — published papers only. ──
   const [validationReport, setValidationReport] = useState(null);
+  const [postPubValidations, setPostPubValidations] = useState([]);
+  const [expandedValidation, setExpandedValidation] = useState(null);
   const [requestingValidation, setRequestingValidation] = useState(false);
+
+  const loadValidations = (groupId) => {
+    API.getPostPublicationReport(groupId).then(setValidationReport).catch(()=>setValidationReport(null));
+    API.listPostPublicationValidations(groupId).then(l=>setPostPubValidations(l||[])).catch(()=>setPostPubValidations([]));
+  };
 
   useEffect(()=>{
     if(paper?.status==="published"&&paper?.groupId){
-      API.getPostPublicationReport(paper.groupId).then(setValidationReport).catch(()=>setValidationReport(null));
-    } else setValidationReport(null);
+      loadValidations(paper.groupId);
+    } else { setValidationReport(null); setPostPubValidations([]); }
   },[viewingId]);
 
   const requestValidation = async () => {
@@ -8108,8 +8115,7 @@ const PapersPanel = ({ papers, onUpdate, onPublish, onCreateRevision, onDelete, 
       const failed = results.filter(r=>!r.success);
       if(okCount) toast.success(`Validation requested from ${okCount} practitioner(s)`);
       failed.forEach(f=>toast.error(`${f.email}: ${f.error}`));
-      const report = await API.getPostPublicationReport(paper.groupId);
-      setValidationReport(report);
+      loadValidations(paper.groupId);
     }catch(e){ toast.error(e.message||"Failed to request validation"); }
     finally{ setRequestingValidation(false); }
   };
@@ -8609,22 +8615,52 @@ const PapersPanel = ({ papers, onUpdate, onPublish, onCreateRevision, onDelete, 
                 Post-Publication Validation
               </div>
               <Btn onClick={requestValidation} disabled={requestingValidation} style={{fontSize:12,padding:"6px 14px"}}>
-                {requestingValidation?"Requesting…":"Request Validation"}
+                {requestingValidation?"Requesting…":(validationReport&&validationReport.invited>0?"Re-invite Practitioners":"Request Validation")}
               </Btn>
             </div>
             {validationReport&&validationReport.invited>0?(
-              <div style={{fontSize:12,color:T.text2}}>
-                <span style={{color:T.teal,fontWeight:600}}>{validationReport.responses}</span> of{" "}
-                <span style={{fontWeight:600}}>{validationReport.invited}</span> practitioner(s) have submitted their final validation.
-                <div style={{marginTop:8,display:"flex",flexWrap:"wrap",gap:6}}>
-                  {(validationReport.practitioners||[]).map((p,i)=>(
-                    <Tag key={i} color={T.text3}>{p}</Tag>
-                  ))}
+              <div>
+                <div style={{fontSize:12,color:T.text2,marginBottom:10}}>
+                  <span style={{color:T.teal,fontWeight:600}}>{validationReport.responses}</span> of{" "}
+                  <span style={{fontWeight:600}}>{validationReport.invited}</span> practitioner(s) have submitted their final validation.
+                </div>
+                {/* The repository itself — every practitioner's actual submitted
+                    content (finding validation / practical applicability /
+                    recommendations / future research), not just the tally above. */}
+                <div style={{display:"flex",flexDirection:"column",gap:6}}>
+                  {postPubValidations.map(v=>{
+                    const submitted = v.status==="submitted";
+                    const isOpen = expandedValidation===v.id;
+                    return (
+                      <div key={v.id} style={{background:T.bg3,borderRadius:6,border:`1px solid ${T.border}`}}>
+                        <div onClick={()=>submitted&&setExpandedValidation(isOpen?null:v.id)}
+                          style={{display:"flex",justifyContent:"space-between",alignItems:"center",
+                            padding:"8px 10px",cursor:submitted?"pointer":"default"}}>
+                          <span style={{fontSize:12,color:"#DCE6F5"}}>
+                            {v.practitionerName||v.practitionerEmail} <span style={{color:T.text3}}>({v.practitionerEmail})</span>
+                          </span>
+                          <Tag color={submitted?T.green:T.amber}>{submitted?"Submitted":"Awaiting response"}</Tag>
+                        </div>
+                        {isOpen&&submitted&&(
+                          <div style={{padding:"0 10px 12px"}}>
+                            {[["Finding validation",v.findingValidation],["Practical applicability",v.practicalApplicability],
+                              ["Recommendations",v.recommendations],["Future research suggestions",v.futureResearchSuggestions]].map(([label,val])=>val&&(
+                              <div key={label} style={{marginBottom:8}}>
+                                <div style={{fontSize:10,color:T.text3,fontWeight:600,marginBottom:2}}>{label}</div>
+                                <div style={{fontSize:12,color:"#DCE6F5",lineHeight:1.5}}>{val}</div>
+                              </div>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })}
                 </div>
               </div>
             ):(
               <div style={{fontSize:12,color:T.text3,fontStyle:"italic"}}>
-                No validation requested yet — this invites every practitioner who reviewed an earlier draft.
+                Every practitioner who reviewed an earlier draft is automatically invited to validate on publish.
+                {" "}No one has reviewed this paper yet, so no validation was sent.
               </div>
             )}
           </div>
