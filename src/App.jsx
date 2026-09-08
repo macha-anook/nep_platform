@@ -4835,7 +4835,7 @@ const RESEARCHER_ROLES = [
 const StudiesListPanel = ({
   projects, projectOutcomes, patients=[], outcomes=[], refs=[], nepStudies=[],
   user={}, activeCompound, onSelectCompound,
-  onImport, onGoToRefs, onGoToValidate, onGoToResults,
+  onImport, importing=false, projectReady=true, onGoToRefs, onGoToValidate, onGoToResults,
   onOpen, onDelete, onNew, onAutoCreate, onUpdateProject, onSaveMeta,
 }) => {
 
@@ -4869,12 +4869,24 @@ const StudiesListPanel = ({
   });
   const compounds = Object.values(compoundMap);
   const selName   = activeCompound || compounds[0]?.name || "";
+
+  // activeCompound starts null on a fresh load — we still display the
+  // first compound via the fallback above, but the project-linkage effect
+  // in the parent only runs once activeCompound is actually set, so tell
+  // it what we resolved to instead of leaving it stuck showing this
+  // compound's data with no linked project (import stays disabled forever).
+  useEffect(()=>{
+    if(!activeCompound && selName) onSelectCompound(selName);
+  },[activeCompound, selName]);
+
   const comp      = compoundMap[selName];
   const compPats  = comp?.patients || [];
   const complete  = compPats.filter(p => p.status === "complete");
   const active    = compPats.filter(p => p.status === "active");
   const secondary = Object.values(comp?.secondaryMap || {});
-  const imported  = outcomes.filter(o => o._fromPatient);
+  const compOutcomes = outcomes.filter(o =>
+    !selName || !o.compound_name || o.compound_name===selName);
+  const imported  = compOutcomes.filter(o => o._fromPatient);
 
   /* ── Dose / freq / duration from patient records ── */
   const uniq = (arr) => [...new Set(arr.filter(Boolean))];
@@ -5035,7 +5047,7 @@ const StudiesListPanel = ({
     .sort((a,b)=>b[1].total-a[1].total).slice(0,8);
 
   /* ── ESS ── */
-  const wsVals = outcomes.map(o=>Number(o._ws)).filter(v=>!isNaN(v)&&v>0);
+  const wsVals = compOutcomes.map(o=>Number(o._ws)).filter(v=>!isNaN(v)&&v>0);
   const ess    = wsVals.length?wsVals.reduce((a,b)=>a+b,0)/wsVals.length:null;
   const essC   = ess==null?"—":ess>=12?"Very Strong":ess>=9?"Strong":ess>=6?"Moderate":"Weak";
   const essCol = ess==null?T.text3:ess>=9?T.green:ess>=6?T.amber:T.red;
@@ -5639,9 +5651,13 @@ const StudiesListPanel = ({
         </div>
         <div style={{display:"flex",gap:10,flexShrink:0}}>
           <Btn variant="secondary" onClick={onImport}
-            disabled={complete.length===0}
+            disabled={complete.length===0||importing||!projectReady}
             style={{fontWeight:600}}>
-            {imported.length>0?"↻ Refresh import":"↓ Import patient data"}
+            {!projectReady
+              ?"↻ Loading study…"
+              :importing
+              ?"↻ Importing…"
+              :imported.length>0?"↻ Refresh import":"↓ Import patient data"}
           </Btn>
           <Btn onClick={onGoToResults}
             style={{fontWeight:700,padding:"10px 24px"}}>
@@ -10409,6 +10425,14 @@ const ValidateGeneratePanel = ({ outcomes, refs, compound, project,
     : allPatients;
   const complete  = compPats.filter(p=>p.status==="complete");
 
+  // Outcome rows scoped to this compound only — `outcomes` may contain
+  // patient-imported rows for every compound the researcher has, since
+  // import pulls from all studies. Never synthesize a paper for one
+  // compound using another compound's evidence.
+  const compOutcomes = _resolvedCompound
+    ? outcomes.filter(o=>!o.compound_name||o.compound_name===_resolvedCompound)
+    : outcomes;
+
   // Evidence methodology
   // Q varies by study type - use mean from patient data
   const qScores = {"RCT":4,"Meta-analysis":5,"Systematic review":5,
@@ -10552,7 +10576,7 @@ useEffect(()=>{
 
 
   if(genMode) return (
-    <GenerationPanel outcomes={outcomes} refs={refs} compound={compound}
+    <GenerationPanel outcomes={compOutcomes} refs={refs} compound={compound}
       project={project} projectId={projectId} onBack={()=>setGenMode(false)}
       setPapers={setPapers}/>
   );
@@ -10581,7 +10605,7 @@ useEffect(()=>{
     {cat:"Compound",  label:"Duration range",    val:compDurRange,     fix:"Auto-sourced from patient data",           nav:"",         required:false},
     {cat:"Compound",  label:"Study notes",       val:notes,            fix:"Study Overview → Study Notes",             nav:"overview", required:false},
     {cat:"Evidence",  label:"Completed cases",   val:compPatsComplete.length>0?`${compPatsComplete.length} cases`:"", fix:"Doctors must close patient cases", nav:"", required:true},
-    {cat:"Evidence",  label:"Outcome rows",      val:(()=>{ const n=outcomes.length||(allPatients||[]).filter(p=>p.status==="complete"&&p.outcome?.outcome1?.direction).length; return n>0?`${n} rows`:""; })(), fix:"Computed Results → Import outcomes", nav:"results", required:true},
+    {cat:"Evidence",  label:"Outcome rows",      val:(()=>{ const n=compOutcomes.length||complete.filter(p=>p.outcome?.outcome1?.direction).length; return n>0?`${n} rows`:""; })(), fix:"Computed Results → Import outcomes", nav:"results", required:true},
     {cat:"Evidence",  label:"ESS computed",      val:ess!=null?`${(Number(ess)||0).toFixed(2)} (${essC})`:"", fix:"Computed Results tab", nav:"results", required:true},
     {cat:"References",label:"References",        val:refs.length>0?`${refs.length} added`:"", fix:"References tab → Search PubMed", nav:"refs", required:false},
   ];
@@ -10616,7 +10640,7 @@ useEffect(()=>{
     try{
       const t = await generatePaperTitle(
         [{name:_resolvedCompound||compound?.name||"",scientific:compound?.scientific||""}],
-        outcomes, project?.target_journal
+        compOutcomes, project?.target_journal
       );
       setTitleVal(t);
       if(project) onUpdateProject({...project,paper_title:t});
@@ -10627,7 +10651,7 @@ useEffect(()=>{
     setGenLoading("keywords");
     try{
       const k = await generateKeywords(
-        [{name:_resolvedCompound||compound?.name||""}], outcomes
+        [{name:_resolvedCompound||compound?.name||""}], compOutcomes
       );
       setKeywordsVal(k);
       if(project) onUpdateProject({...project,keywords:k});
@@ -11103,7 +11127,7 @@ useEffect(()=>{
           <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8}}>
             {[
               {label:"Completed cases",    ok:complete.length>0,  detail:`${complete.length} cases`},
-              {label:"Outcome rows",       ok:outcomes.length>0,  detail:`${outcomes.length} rows imported`},
+              {label:"Outcome rows",       ok:compOutcomes.length>0,  detail:`${compOutcomes.length} rows imported`},
               {label:"ESS computed",       ok:ess!=null,          detail:ess!=null?`${(Number(ess)||0).toFixed(2)} · ${essC}`:"Not yet"},
               {label:"Lead researcher",    ok:!!lead,             detail:lead||"Not set"},
               {label:"Paper title",        ok:!!titleVal,         detail:titleVal?titleVal.slice(0,40)+"…":"Not set"},
@@ -14605,6 +14629,7 @@ export default function App(){
   const [projectOutcomes,setProjectOutcomes]=useState({});
   const [project,setProject]              = useState(null);
   const [outcomes,setOutcomes]             = useState([]);
+  const [importingOutcomes,setImportingOutcomes] = useState(false);
   const [papers,setPapers]                 = useState([]);
 
   const loadPapers = async (projectId) => {
@@ -14728,7 +14753,7 @@ export default function App(){
 
   /* Load all patients from Supabase (across all studies) */
   const loadAllPatients=useCallback(async()=>{
-    if(!user) return;
+    if(!user) return [];
     const all=[];
     for(const s of nepStudies){
       try{
@@ -14737,6 +14762,7 @@ export default function App(){
       }catch(e){}
     }
     setAllPatients(all);
+    return all;
   },[user,nepStudies]);
 
   useEffect(()=>{ if(nepStudies.length>0) loadAllPatients(); },[nepStudies]);
@@ -14779,6 +14805,12 @@ export default function App(){
   useEffect(()=>{
     if(activeTab!=="studies" || !activeCompound || !user || user.role==="doctor") return;
     if(project?.compound_id===activeCompound) return;
+    // Wait for the real project list to load before deciding whether one
+    // already exists for this compound — otherwise this runs against a
+    // still-empty `projects` array on first load and creates a duplicate
+    // project (with a fresh id) every time, orphaning outcomes/refs saved
+    // under the previous project id.
+    if(projectsLoading) return;
     (async()=>{
       try{
         let match=projects.find(p=>p.compound_id===activeCompound);
@@ -14794,7 +14826,7 @@ export default function App(){
         toast.error("Failed to load study project: "+(e.message||""));
       }
     })();
-  },[activeTab,activeCompound,user]);
+  },[activeTab,activeCompound,user,projectsLoading,projects]);
 
   /* Load a project */
   const loadProject=async(proj)=>{
@@ -14939,9 +14971,18 @@ export default function App(){
   };
 
   // Import completed patient outcomes
-  const importPatientOutcomes=()=>{
-    const freshPatients=loadAllPatients();
-    const completed=freshPatients.filter(p=>p.status==="complete"&&p.outcome);
+  const importPatientOutcomes=async()=>{
+    if(importingOutcomes) return;
+    if(!project?.id){
+      toast.error("No study linked yet — wait for the study to finish loading before importing.");
+      return;
+    }
+    setImportingOutcomes(true);
+    try{
+    const scopeCompound=activeCompound||project?.compound_name||null;
+    const freshPatients=await loadAllPatients();
+    const completed=freshPatients.filter(p=>p.status==="complete"&&p.outcome
+      &&(!scopeCompound||p.primaryCompound?.name===scopeCompound));
     if(!completed.length){
       toast.error("No completed patient outcomes found.");
       return;
@@ -14992,16 +15033,32 @@ export default function App(){
       const ws=score.ws(Number(o.quality_score),ss,Number(o.outcome_score),bp,o.significance);
       return {...o,_sampleScore:ss,_biasP:bp,_ws:ws};
     });
-    setOutcomes(prev=>{
-      const seen=new Set(prev.map(o=>o._patientId+"|"+o.outcome_name));
-      const fresh=scored.filter(o=>!seen.has(o._patientId+"|"+o.outcome_name));
-      const all=[...prev,...fresh];
-      // Always persist to _STORE — use project.id or fallback key
-      const pid = project?.id || "_default";
-      try{ API.saveOutcomes(pid, all); }catch(e){}
-      return all;
+    // Compute the merge from current state directly rather than inside the
+    // setOutcomes updater — that callback isn't guaranteed to run
+    // synchronously, so a variable assigned inside it (toPersist=...) can
+    // still read back as null on the very next line.
+    const existingByKey=new Map(outcomes.map(o=>[o._patientId+"|"+o.outcome_name,o]));
+    // Reuse the existing row's id when we've imported this patient/outcome
+    // before, so the upsert below updates that row instead of silently
+    // being skipped (stale local state) or creating a duplicate row
+    // (fresh random id every import).
+    const merged=scored.map(o=>{
+      const existing=existingByKey.get(o._patientId+"|"+o.outcome_name);
+      return existing?{...o,id:existing.id}:o;
     });
-    toast.success(`✓ Imported ${scored.length} outcome rows from ${completed.length} patients`);
+    const mergedKeys=new Set(merged.map(o=>o._patientId+"|"+o.outcome_name));
+    const untouched=outcomes.filter(o=>!mergedKeys.has(o._patientId+"|"+o.outcome_name));
+    const toPersist=merged;
+    try{
+      await API.saveOutcomes(project.id, toPersist);
+      setOutcomes([...untouched,...merged]);
+      toast.success(`✓ Imported ${scored.length} outcome rows from ${completed.length} patients`);
+    }catch(e){
+      toast.error("Outcomes imported locally but failed to save: "+e.message);
+    }
+    }finally{
+      setImportingOutcomes(false);
+    }
   };
 
   // Note: outcomes are imported manually via "Import patient data" button
@@ -15342,6 +15399,8 @@ export default function App(){
                   activeCompound={activeCompound}
                   onSelectCompound={setActiveCompound}
                   onImport={importPatientOutcomes}
+                  importing={importingOutcomes}
+                  projectReady={!!project?.id && project?.compound_id===activeCompound}
                   onGoToResults={()=>setCompoundTab("results")}
                   onGoToRefs={()=>setCompoundTab("refs")}
                   onGoToValidate={()=>setCompoundTab("generate")}
@@ -15375,8 +15434,10 @@ export default function App(){
                         {allPatients.filter(p=>p.status==="complete").length} completed cases ready.
                         Import to compute evidence scores.
                       </div>
-                      <Btn onClick={importPatientOutcomes} style={{fontWeight:700}}>
-                        ↓ Import now
+                      <Btn onClick={importPatientOutcomes}
+                        disabled={importingOutcomes||!project?.id}
+                        style={{fontWeight:700}}>
+                        {!project?.id?"↻ Loading study…":importingOutcomes?"↻ Importing…":"↓ Import now"}
                       </Btn>
                     </div>
                   )}
@@ -15446,8 +15507,9 @@ export default function App(){
                 <div className="fade-in">
                   <SectionHeader title="Evidence"
                     subtitle={`${outcomes.length} outcome rows · ESS ${(Number(ess)||0).toFixed(2)} (${essC})`}
-                    action={<Btn onClick={importPatientOutcomes} style={{fontSize:12}}>
-                      ↓ Import / refresh
+                    action={<Btn onClick={importPatientOutcomes} disabled={importingOutcomes}
+                      style={{fontSize:12}}>
+                      {importingOutcomes?"↻ Importing…":"↓ Import / refresh"}
                     </Btn>}/>
                   {outcomes.length===0?(
                     <div style={{textAlign:"center",padding:"60px 20px",
@@ -15456,7 +15518,9 @@ export default function App(){
                       <p style={{fontSize:13,color:T.text3,marginBottom:16}}>
                         No outcomes yet. Import from doctor patient data.
                       </p>
-                      <Btn onClick={importPatientOutcomes}>↓ Import patient outcomes</Btn>
+                      <Btn onClick={importPatientOutcomes} disabled={importingOutcomes}>
+                        {importingOutcomes?"↻ Importing…":"↓ Import patient outcomes"}
+                      </Btn>
                     </div>
                   ):(
                     <>
