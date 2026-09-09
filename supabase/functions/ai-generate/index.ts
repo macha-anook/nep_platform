@@ -404,7 +404,7 @@ async function handleReconciliationApply(adminClient, anthropicKey, job, jobId) 
 
   const { data: accepted, error: acceptedErr } = await adminClient
     .from("comment_change_map")
-    .select("*, paper_review_comments(section_key, comment_text)")
+    .select("*, paper_review_comments!comment_change_map_comment_id_fkey(section_key, comment_text)")
     .eq("reconciliation_id", reconciliationId).eq("researcher_decision", "accepted");
   if (acceptedErr) throw new Error(acceptedErr.message);
   if (!accepted || !accepted.length) throw new Error("No accepted recommendations to apply");

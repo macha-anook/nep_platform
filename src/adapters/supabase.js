@@ -744,7 +744,7 @@ export const adapter = {
   async getReconciliation(reconciliationId) {
     const { data, error } = await supabase
       .from('comment_change_map')
-      .select('*, paper_review_comments(section_key, comment_text, importance, review_id)')
+      .select('*, paper_review_comments!comment_change_map_comment_id_fkey(section_key, comment_text, importance, review_id)')
       .eq('reconciliation_id', reconciliationId)
       .order('ai_category', { ascending: true });
     return check(data, error, 'getReconciliation');
@@ -1374,10 +1374,23 @@ export const adapter = {
     const { data: { user } } = await supabase.auth.getUser();
     const email = user.email.toLowerCase();
 
-    const { data: existing } = await supabase
+    const { data: cycle } = await supabase
+      .from('paper_review_cycles').select('id')
+      .eq('paper_id', paperId).order('cycle_number', { ascending: false }).limit(1).maybeSingle();
+
+    // Only resume an in-progress review if it belongs to the currently open
+    // cycle. A row left in-progress from an older cycle (that has since been
+    // closed and superseded) must not be silently reused, or its eventual
+    // submission/comments get attributed to a review_cycle_id the researcher
+    // has already closed — making them invisible to AI reconciliation, which
+    // queries paper_reviews by the current cycle id.
+    let existingQuery = supabase
       .from('paper_reviews').select('*')
-      .eq('paper_id', paperId).eq('reviewer_email', email).eq('status', 'in_progress')
-      .maybeSingle();
+      .eq('paper_id', paperId).eq('reviewer_email', email).eq('status', 'in_progress');
+    existingQuery = cycle?.id
+      ? existingQuery.eq('review_cycle_id', cycle.id)
+      : existingQuery.is('review_cycle_id', null);
+    const { data: existing } = await existingQuery.maybeSingle();
     if (existing) return existing;
 
     const { data: draft, error: dErr } = await supabase
@@ -1392,10 +1405,6 @@ export const adapter = {
     const { count: priorCount } = await supabase
       .from('paper_reviews').select('id', { count: 'exact', head: true })
       .eq('paper_id', paperId).eq('reviewer_email', email);
-
-    const { data: cycle } = await supabase
-      .from('paper_review_cycles').select('id')
-      .eq('paper_id', paperId).order('cycle_number', { ascending: false }).limit(1).maybeSingle();
 
     const { data, error } = await supabase
       .from('paper_reviews')
