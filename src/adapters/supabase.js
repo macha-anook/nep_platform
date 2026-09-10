@@ -31,6 +31,22 @@ function check(data, error, label) {
   return data;
 }
 
+// supabase-js wraps a non-2xx edge function response in a generic
+// FunctionsHttpError whose .message is just "Edge Function returned a
+// non-2xx status code" — every actual {error: "..."} message our edge
+// functions return lives on error.context (the raw Response object), not
+// on error.message or the invoke() call's `data`. Without this, every
+// friendly error message an edge function returns gets silently replaced
+// by that one generic string.
+async function functionErrorMessage(error, fallback) {
+  if (!error) return fallback;
+  try {
+    const body = await error.context?.json?.();
+    if (body?.error) return body.error;
+  } catch (_) { /* context wasn't JSON, or already consumed */ }
+  return error.message || fallback;
+}
+
 // Real columns on the `projects` table. Callers pass UI-only fields
 // (notes, prognosis, compound_name, team, journal, a display project_id
 // code, ...) that PostgREST rejects with PGRST204 if forwarded as-is.
@@ -40,6 +56,19 @@ const PROJECT_COLUMNS = ['name', 'compound_id', 'target_journal', 'paper_title',
 function pickProjectColumns(obj) {
   const out = {};
   PROJECT_COLUMNS.forEach(k => { if (k in obj) out[k] = obj[k]; });
+  return out;
+}
+
+// Real columns on `study_references`. The reference-search UI attaches
+// display-only fields (_source: "PubMed"/"Semantic Scholar", _url) to each
+// result for rendering — those aren't real columns and PostgREST rejects
+// them with PGRST204 if forwarded as-is (id/project_id/org_id are handled
+// separately by saveRef, not through this filter).
+const REF_COLUMNS = ['ref_id', 'study_ref_id', 'compound_id', 'title', 'authors',
+  'year', 'journal', 'volume', 'issue', 'pages', 'doi', 'bias_tool', 'bias_overall', 'sort_order'];
+function pickRefColumns(obj) {
+  const out = {};
+  REF_COLUMNS.forEach(k => { if (k in obj) out[k] = obj[k]; });
   return out;
 }
 
@@ -365,7 +394,7 @@ export const adapter = {
         createdBy:       session.user.id,
       },
     });
-    if (error) throw new Error(error.message || 'Failed to send invitation');
+    if (error) throw new Error(await functionErrorMessage(error, 'Failed to send invitation'));
     return body;
   },
 
@@ -553,7 +582,7 @@ export const adapter = {
     const orgId = await getOrgId();
     const { data, error } = await supabase
       .from('study_references')
-      .upsert({ ...ref, project_id: projectId, org_id: orgId }, { onConflict: 'id' })
+      .upsert({ ...pickRefColumns(ref), id: ref.id, project_id: projectId, org_id: orgId }, { onConflict: 'id' })
       .select().single();
     return check(data, error, 'saveRef');
   },
@@ -639,29 +668,56 @@ export const adapter = {
   // session, so its org_id/project_id are trustworthy before the Edge
   // Function (service role) ever reads them — the function is invoked with
   // only the jobId, not fresh project/paper ids from the client.
+  // Generates ONLY the AI-editable narrative fragments (introduction,
+  // discussion, bioavailability, conclusions) grounded in the caller's
+  // already-computed WS/ESS metrics — it does not create or touch any
+  // paper_drafts row. buildDocxBlob (src/App.jsx) is the one place a draft's
+  // computed content + narrative get assembled and persisted together.
+  // opts.onProgress(job), if given, is called every ~600ms with the current
+  // ai_jobs row (stage/pct/status) for as long as the request is in flight —
+  // real server-side progress (this job type only reports two checkpoints:
+  // stage 1→10% on start, stage 2→40% before the Claude call, 100% on
+  // done) rather than a client-side animation with no relationship to how
+  // long the actual AI call takes.
   async generateAIDraft(projectId, opts = {}) {
     const orgId = await getOrgId();
     const { data: { user } } = await supabase.auth.getUser();
-    const { paperId = null, sections = null } = opts;
+    const { paperId = null, metrics = null, onProgress = null } = opts;
 
     const { data: job, error: jobErr } = await supabase
       .from('ai_jobs')
       .insert({
         org_id: orgId, project_id: projectId, paper_id: paperId,
         job_type: 'draft_sections', status: 'pending',
-        input_ref: { paperId, sections },
+        input_ref: { paperId, metrics },
         created_by: user.id,
       })
       .select().single();
     check(job, jobErr, 'generateAIDraft/insert');
 
-    const { data: body, error } = await supabase.functions.invoke('ai-generate', {
-      headers: { Authorization: `Bearer ${supabaseKey}` },
-      body: { jobId: job.id },
-    });
-    if (error) throw new Error(error.message || 'AI draft generation failed');
-    if (body?.error) throw new Error(body.error);
-    return { jobId: job.id, paperId: body.paperId, draftId: body.draftId };
+    let polling = !!onProgress;
+    if (onProgress) {
+      (async () => {
+        while (polling) {
+          const row = await this.pollAIJob(job.id);
+          if (row) onProgress(row);
+          if (!polling) break;
+          await new Promise(r => setTimeout(r, 600));
+        }
+      })();
+    }
+
+    try {
+      const { data: body, error } = await supabase.functions.invoke('ai-generate', {
+        headers: { Authorization: `Bearer ${supabaseKey}` },
+        body: { jobId: job.id },
+      });
+      if (error) throw new Error(await functionErrorMessage(error, 'AI draft generation failed'));
+      if (body?.error) throw new Error(body.error);
+      return { jobId: job.id, paperId: body.paperId, narrativeContent: body.narrativeContent };
+    } finally {
+      polling = false;
+    }
   },
 
   async pollAIJob(jobId) {
@@ -676,14 +732,14 @@ export const adapter = {
   async generatePreface(projectId, opts = {}) {
     const orgId = await getOrgId();
     const { data: { user } } = await supabase.auth.getUser();
-    const { paperId = null } = opts;
+    const { paperId = null, metrics = null } = opts;
 
     const { data: job, error: jobErr } = await supabase
       .from('ai_jobs')
       .insert({
         org_id: orgId, project_id: projectId, paper_id: paperId,
         job_type: 'preface', status: 'pending',
-        input_ref: { paperId },
+        input_ref: { paperId, metrics },
         created_by: user.id,
       })
       .select().single();
@@ -693,7 +749,7 @@ export const adapter = {
       headers: { Authorization: `Bearer ${supabaseKey}` },
       body: { jobId: job.id },
     });
-    if (error) throw new Error(error.message || 'AI preface generation failed');
+    if (error) throw new Error(await functionErrorMessage(error, 'AI preface generation failed'));
     if (body?.error) throw new Error(body.error);
     return { jobId: job.id, paperId: body.paperId, prefaceId: body.prefaceId };
   },
@@ -727,7 +783,7 @@ export const adapter = {
       headers: { Authorization: `Bearer ${supabaseKey}` },
       body: { jobId: job.id },
     });
-    if (error) throw new Error(error.message || 'AI comment reconciliation failed');
+    if (error) throw new Error(await functionErrorMessage(error, 'AI comment reconciliation failed'));
     if (body?.error) throw new Error(body.error);
     return { jobId: job.id, reconciliationId: body.reconciliationId };
   },
@@ -774,12 +830,22 @@ export const adapter = {
       headers: { Authorization: `Bearer ${supabaseKey}` },
       body: { jobId: job.id },
     });
-    if (error) throw new Error(error.message || 'Failed to generate reconciled draft');
+    if (error) throw new Error(await functionErrorMessage(error, 'Failed to generate reconciled draft'));
     if (body?.error) throw new Error(body.error);
+
+    // The edge function only revises narrative_content (the AI-editable
+    // part) — the caller still needs to render the actual .docx from it
+    // (buildDocxBlob, client-side) to produce a downloadable, consistent file.
+    const { data: newDraft } = await supabase
+      .from('paper_drafts').select('narrative_content').eq('id', body.draftId).maybeSingle();
+
     // prefaceId is set when the paper had a project to regenerate the
     // preface against (feature #3: auto-regenerate "whenever major
     // revisions happen") — null if that best-effort step didn't run/failed.
-    return { jobId: job.id, draftId: body.draftId, prefaceId: body.prefaceId || null };
+    return {
+      jobId: job.id, draftId: body.draftId, prefaceId: body.prefaceId || null,
+      narrativeContent: newDraft?.narrative_content || null,
+    };
   },
 
   // ── CLINICAL STUDIES ─────────────────────────────────────────────────────
@@ -1079,24 +1145,38 @@ export const adapter = {
   },
 
   // Create a new paper group + initial draft (called after generation).
+  // existingPaperId: when a preface was generated first (feature #3 ordering
+  // — preface before draft), that call already created the papers row;
+  // pass its id here instead of creating a second, orphaned paper.
+  // existingPrefaceId: stamps paper_drafts.preface_id at creation, so the
+  // draft-to-preface relationship (migration 022) is set once, correctly,
+  // instead of needing a later backfill.
   async createPaperDraft(projectId, data) {
     const orgId = await getOrgId();
     const { data: { user } } = await supabase.auth.getUser();
 
-    // Insert the paper group
-    const { data: paper, error: pErr } = await supabase
-      .from('papers')
-      .insert({
-        org_id: orgId,
-        project_id: projectId,
-        title: data.title || '',
-        compound: data.compound || '',
-        current_version: 0,
-        created_by: user.id,
-      })
-      .select()
-      .single();
-    check(paper, pErr, 'createPaperDraft/paper');
+    let paper;
+    if (data.existingPaperId) {
+      const { data: existing, error: findErr } = await supabase
+        .from('papers').select('*').eq('id', data.existingPaperId).single();
+      check(existing, findErr, 'createPaperDraft/existingPaper');
+      paper = existing;
+    } else {
+      const { data: created, error: pErr } = await supabase
+        .from('papers')
+        .insert({
+          org_id: orgId,
+          project_id: projectId,
+          title: data.title || '',
+          compound: data.compound || '',
+          current_version: 0,
+          created_by: user.id,
+        })
+        .select()
+        .single();
+      check(created, pErr, 'createPaperDraft/paper');
+      paper = created;
+    }
 
     // Insert the draft
     const { data: draft, error: dErr } = await supabase
@@ -1108,6 +1188,7 @@ export const adapter = {
         source_version_number: null,
         next_version_number: 1,
         html_content: data.htmlContent || '',
+        narrative_content: data.narrativeContent || null,
         file_name: data.fileName || '',
         file_data: data.fileData || '',
         file_size: data.fileSize || 0,
@@ -1115,6 +1196,7 @@ export const adapter = {
         compound: data.compound || '',
         notes: data.notes || '',
         metadata: data.metadata || {},
+        preface_id: data.existingPrefaceId || null,
         created_by: user.id,
       })
       .select()
@@ -1141,14 +1223,18 @@ export const adapter = {
     const nextVer = (maxRow?.version_number || 0) + 1;
 
     const payload = { next_version_number: nextVer, updated_at: new Date().toISOString() };
-    if (data.htmlContent !== undefined) payload.html_content = data.htmlContent;
-    if (data.fileName    !== undefined) payload.file_name    = data.fileName;
-    if (data.fileData    !== undefined) payload.file_data    = data.fileData;
-    if (data.fileSize    !== undefined) payload.file_size    = data.fileSize;
-    if (data.title       !== undefined) payload.title        = data.title;
-    if (data.compound    !== undefined) payload.compound     = data.compound;
-    if (data.notes       !== undefined) payload.notes        = data.notes;
-    if (data.metadata    !== undefined) payload.metadata     = data.metadata;
+    if (data.htmlContent     !== undefined) payload.html_content     = data.htmlContent;
+    if (data.narrativeContent!== undefined) payload.narrative_content= data.narrativeContent;
+    if (data.fileName        !== undefined) payload.file_name        = data.fileName;
+    if (data.fileData        !== undefined) payload.file_data        = data.fileData;
+    if (data.fileSize        !== undefined) payload.file_size        = data.fileSize;
+    if (data.title           !== undefined) payload.title            = data.title;
+    if (data.compound        !== undefined) payload.compound         = data.compound;
+    if (data.notes           !== undefined) payload.notes            = data.notes;
+    if (data.metadata        !== undefined) payload.metadata         = data.metadata;
+    // Only ever set once from null — the identity-guard trigger (migration
+    // 022) rejects changing an already-set preface_id, by design.
+    if (data.prefaceId       !== undefined) payload.preface_id       = data.prefaceId;
 
     const { data: updated, error } = await supabase
       .from('paper_drafts').update(payload).eq('id', draftId).select().single();
@@ -1157,6 +1243,25 @@ export const adapter = {
     const { data: paper } = await supabase
       .from('papers').select('*').eq('id', updated.paper_id).single();
     return this._normDraft(updated, paper);
+  },
+
+  // "Regenerate with AI" (feature #2: "support regeneration of drafts as
+  // research evolves") — branches a new draft VERSION from the current one
+  // (via the same restore_draft_version primitive migration 022/023 already
+  // defines for version history/lineage), then immediately overwrites that
+  // new row's rendered file + narrative with freshly generated content.
+  // A real new version, not an in-place edit — consistent with how
+  // draft_sections/reconciliation_apply always create a new row rather than
+  // mutate an existing one.
+  async regenerateAIDraft(draftId, { fileName, fileData, fileSize, narrativeContent }) {
+    const { data: branched, error: branchErr } = await supabase
+      .rpc('restore_draft_version', { p_draft_id: draftId });
+    check(branched, branchErr, 'regenerateAIDraft/branch');
+
+    return this.updatePaperDraft(branched.id, {
+      fileName, fileData, fileSize, narrativeContent,
+      notes: 'Regenerated by AI draft assistant',
+    });
   },
 
   // Publish a draft via the security-definer DB function.
@@ -1288,7 +1393,7 @@ export const adapter = {
         orgId, invitedByUserId: session.user.id,
       },
     });
-    if (error) throw new Error(error.message || 'Failed to send invitation');
+    if (error) throw new Error(await functionErrorMessage(error, 'Failed to send invitation'));
     return body;
   },
 
@@ -1325,10 +1430,22 @@ export const adapter = {
       .from('paper_drafts').select('*').eq('paper_id', paperId)
       .order('updated_at', { ascending: false }).limit(1).maybeSingle();
     if (dErr || !draft) throw new Error('No draft available to review yet');
+
+    // Feature #3: the preface that was actually used to generate/revise
+    // THIS draft (draft.preface_id, migration 022) — not just "whatever's
+    // newest" — so a reviewer sees the summary matching what they're reading.
+    let preface = null;
+    if (draft.preface_id) {
+      const { data: p } = await supabase
+        .from('paper_prefaces').select('content, version_number').eq('id', draft.preface_id).maybeSingle();
+      preface = p || null;
+    }
+
     return {
       id: paper.id, title: draft.title || paper.title, compound: draft.compound || paper.compound,
       nextVersion: draft.next_version_number, htmlContent: draft.html_content,
       fileName: draft.file_name, fileData: draft.file_data, fileSize: draft.file_size,
+      preface: preface?.content || null, prefaceVersion: preface?.version_number || null,
     };
   },
 
@@ -1538,7 +1655,7 @@ export const adapter = {
             researcherEmail: session.user.email, orgId,
           },
         });
-        if (error) throw new Error(error.message || 'Failed to send');
+        if (error) throw new Error(await functionErrorMessage(error, 'Failed to send'));
         return { email: p.practitioner_email, success: true, ...body };
       } catch (e) {
         return { email: p.practitioner_email, success: false, error: e.message };
@@ -1590,6 +1707,13 @@ export const adapter = {
       .from('paper_review_comments').select('section_key, comment_text')
       .eq('paper_id', paperId).eq('implementation_status', 'implemented');
 
+    // Feature #3: the preface from the review round that produced THIS
+    // published version (paper_prefaces.linked_version_id, migration 020) —
+    // paper_versions has no preface_id column of its own to follow directly.
+    const { data: preface } = await supabase
+      .from('paper_prefaces').select('content, version_number')
+      .eq('linked_version_id', finalVersion.id).maybeSingle();
+
     return {
       id: paper.id, title: paper.title, compound: paper.compound,
       version: finalVersion.version_number, htmlContent: finalVersion.html_content,
@@ -1598,6 +1722,7 @@ export const adapter = {
         version: previousVersion.version_number, htmlContent: previousVersion.html_content,
       } : null,
       implementedChanges: implementedComments || [],
+      preface: preface?.content || null, prefaceVersion: preface?.version_number || null,
     };
   },
 

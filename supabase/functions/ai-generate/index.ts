@@ -28,31 +28,50 @@ import { corsHeaders }   from "../_shared/cors.ts";
 const ANTHROPIC_MODEL = Deno.env.get("ANTHROPIC_MODEL") || "claude-sonnet-5";
 
 function anthropicErrorMessage(data) {
+  const type = data?.error?.type;
   const msg = data?.error?.message || "Anthropic API error";
   if (/^model:/i.test(msg)) {
     return `${msg} — check console.anthropic.com for models available to this API key, ` +
       `then update the ANTHROPIC_MODEL Supabase secret.`;
   }
-  return msg;
+  if (type === "overloaded_error") return "The AI service is temporarily overloaded — please try again in a minute.";
+  if (type === "rate_limit_error") return "Too many AI requests right now — please wait a moment and try again.";
+  if (type === "authentication_error") return "AI generation isn't configured correctly on this platform — contact your administrator.";
+  return `AI generation failed: ${msg}`;
 }
 
-const PROMPT_VERSION_DRAFT = "draft-sections-v1";
+const PROMPT_VERSION_DRAFT = "draft-narrative-v2";
 const PROMPT_VERSION_PREFACE = "preface-v1";
 const PROMPT_VERSION_RECONCILE = "reconciliation-v1";
-const PROMPT_VERSION_RECONCILE_APPLY = "reconciliation-apply-v1";
+const PROMPT_VERSION_RECONCILE_APPLY = "reconciliation-apply-v2";
 
-// Sections the brief explicitly forbids at draft stage — they depend on
-// outcome analysis that hasn't happened yet. Enforced by the prompt AND by
-// stripping any matching heading the model produces anyway.
-const DISALLOWED_SECTIONS = ["results", "analysis", "discussion", "conclusion", "conclusions"];
-const DEFAULT_SECTIONS = ["Title", "Keywords", "Abstract", "Introduction", "Methods"];
+// The only fields AI is ever allowed to author. Abstract stats and Results
+// tables are always computed client-side (buildDocxBlob, src/App.jsx) from
+// live outcome/scoring data — the AI never sees or writes numbers, it only
+// writes prose grounded in numbers it's given.
+// Matches buildDocxBlob's (src/App.jsx) subsection structure exactly:
+// "discussion" = 4.1 Evidence Strength and Consistency, "bioavailability" =
+// 4.2 Bioavailability and Formulation Considerations — the only two
+// Discussion subsections that are narrative rather than fully templated;
+// 4.3-4.5 (Statistical vs Clinical Significance, Risk of Bias, Limitations)
+// are always deterministic and never touched by AI.
+const NARRATIVE_FIELDS = ["introduction", "discussion", "bioavailability", "conclusions"];
+// Section labels a comment/recommendation can be routed to. Must match
+// section_key values practitioners actually pick and buildDocxBlob's own
+// heading names (Abstract/Results/Methods are ALWAYS computed — never
+// AI-editable — but a comment can still legitimately be *about* one of them).
+const RECONCILE_SECTIONS = ["Abstract", "Introduction", "Methods", "Results", "Discussion", "Conclusions", "General"];
+// The subset of the above that AI-driven reconciliation is actually allowed
+// to rewrite. Anything else (Abstract stats, Results/tables) must be fixed
+// by correcting the underlying outcome/study data, never by editing prose.
+const NARRATIVE_EDITABLE_SECTIONS = ["Introduction", "Discussion", "Conclusions"];
 
 const PREFACE_FIELDS = [
   "overview", "problem_statement", "motivation", "objectives",
   "scope", "methodology", "expected_contributions", "reviewer_guidance",
 ];
 
-function buildContext(project, compound, outcomes, refs) {
+function buildContext(project, compound, outcomes, refs, metrics) {
   const lines = [];
   lines.push(`Paper title (working): ${project?.paper_title || "(untitled)"}`);
   lines.push(`Target journal: ${project?.target_journal || "(unspecified)"}`);
@@ -72,70 +91,52 @@ function buildContext(project, compound, outcomes, refs) {
   refs.slice(0, 60).forEach((r, i) => {
     lines.push(`${i + 1}. ${r.authors || "?"} (${r.year || "?"}). ${r.title || "?"}. ${r.journal || ""}.`);
   });
+  if (metrics) {
+    lines.push("");
+    lines.push(`COMPUTED EVIDENCE METRICS (source of truth — cite these exact figures, never alter or invent numbers):`);
+    lines.push(`Evidence Strength Score (ESS): ${metrics.ess ?? "—"} (${metrics.essC || "—"})`);
+    lines.push(`GRADE-parallel certainty estimate: ${metrics.grade || "—"}`);
+    lines.push(`Outcome consistency: ${metrics.consC || "—"} · Clinical significance: ${metrics.clinC || "—"}`);
+    lines.push(`Bias profile: ${metrics.biasC || "—"} (mean bias penalty ${metrics.meanBias ?? "—"}/5.0)`);
+    lines.push(`Studies: ${metrics.nStudies ?? "—"}, Participants: ${metrics.parts ?? "—"}, Outcomes assessed: ${metrics.nOutcomes ?? "—"}`);
+    if (metrics.topOutcome) lines.push(`Strongest outcome: ${metrics.topOutcome}`);
+    if (Array.isArray(metrics.outcomes) && metrics.outcomes.length) {
+      lines.push(`Outcome-level scores:`);
+      metrics.outcomes.slice(0, 20).forEach((o, i) => {
+        lines.push(`  ${i + 1}. ${o.name || "?"} — direction=${o.direction || "?"}, significance=${o.significance || "?"}, WS=${o.ws ?? "?"}, n=${o.n ?? "?"}, MCID met=${o.mcidMet ? "yes" : "no"}`);
+      });
+    }
+  }
   return lines.join("\n");
 }
 
-function systemPrompt(sections) {
-  return `You are an expert medical writer drafting sections of a nutraceutical clinical ` +
-    `evidence-synthesis research paper in IMRaD style for the NEP Platform (Nutraceutical ` +
-    `Evidence Platform). You will be given structured data about a compound, its study ` +
-    `outcomes, and its references.
+function narrativeSystemPrompt() {
+  return `You are an expert medical writer drafting the NARRATIVE sections of a nutraceutical ` +
+    `clinical evidence-synthesis research paper in IMRaD style for the NEP Platform. You will be ` +
+    `given structured data about a compound, its study outcomes, references, and COMPUTED EVIDENCE ` +
+    `METRICS (Weighted Scores, Evidence Strength Score, GRADE estimate).
 
-Produce ONLY these sections, in this order: ${sections.join(", ")}.
+You write ONLY prose — Introduction, and two Discussion subsections (Evidence Strength/Consistency ` +
+    `interpretation, and Bioavailability/Formulation considerations), and Conclusions. Every other ` +
+    `part of this paper (Title, Abstract statistics, Methods, Results tables, Statistical vs Clinical ` +
+    `Significance, Risk of Bias, Limitations) is generated deterministically from live database ` +
+    `records and computed scores, NOT by you — never write those sections.
 
-Do NOT write Results, Data Analysis, Discussion, or Conclusions under any circumstance — ` +
-    `those sections depend on outcome analysis that has not been finalised yet, and you have ` +
-    `no analysis to draw on. If you are unsure whether something belongs in Methods vs ` +
-    `Results, leave it out.
+The computed evidence metrics you are given are the source of truth. Cite them exactly as given ` +
+    `(e.g. the ESS value, GRADE certainty, outcome-level Weighted Scores) — never invent, alter, ` +
+    `round differently, or contradict a number you were given. If a metric isn't given, don't state ` +
+    `a number for it.
 
-Output clean semantic HTML only: <h1> for the paper title, <h2> for each major section ` +
-    `heading, <p> for paragraphs, <ul>/<li> for lists where useful. Do not include <html>, ` +
-    `<head>, or <body> tags, markdown formatting, or any commentary outside the HTML. Do not ` +
-    `fabricate specific numeric results, effect sizes, or citations beyond what is given below.`;
-}
+Return ONLY a single JSON object with exactly these keys, each a string of flowing academic prose ` +
+    `(no headings, no markdown, no bullet points): "introduction" (500-700 words: health burden, ` +
+    `limitations of conventional care, the compound's background/mechanism, existing evidence ` +
+    `landscape, rationale for this synthesis), "discussion" (400-500 words: interpretation of the ` +
+    `ESS/GRADE classification and key outcome findings), "bioavailability" (250-350 words: formulation ` +
+    `standardisation and bioavailability considerations for this compound/extract), "conclusions" ` +
+    `(150-200 words: a cohesive summary paragraph with a clear recommendation for ` +
+    `clinicians/researchers).
 
-// Defensive net: drop any heading (and its following content, up to the next
-// heading of equal-or-higher level) whose text matches a disallowed section,
-// in case the model ignores the system prompt.
-function stripDisallowedSections(html) {
-  const parts = html.split(/(?=<h[1-3][^>]*>)/i);
-  const kept = [];
-  const stripped = [];
-  for (const part of parts) {
-    const headingMatch = part.match(/<h[1-3][^>]*>(.*?)<\/h[1-3]>/i);
-    const headingText = headingMatch ? headingMatch[1].replace(/<[^>]+>/g, "").trim().toLowerCase() : "";
-    const isDisallowed = headingText && DISALLOWED_SECTIONS.some(d => headingText.includes(d));
-    if (isDisallowed) stripped.push(headingMatch[1]);
-    else kept.push(part);
-  }
-  return { cleaned: kept.join(""), stripped };
-}
-
-async function callClaude(anthropicKey, sections, contextText, strict) {
-  const messages = [{
-    role: "user",
-    content: strict
-      ? `${contextText}\n\nReminder: absolutely no Results, Analysis, Discussion, or ` +
-        `Conclusions sections — only ${sections.join(", ")}.`
-      : contextText,
-  }];
-  const res = await fetch("https://api.anthropic.com/v1/messages", {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      "anthropic-version": "2023-06-01",
-      "x-api-key": anthropicKey,
-    },
-    body: JSON.stringify({
-      model: ANTHROPIC_MODEL,
-      max_tokens: 4000,
-      system: systemPrompt(sections),
-      messages,
-    }),
-  });
-  const data = await res.json();
-  if (!res.ok) throw new Error(anthropicErrorMessage(data));
-  return (data.content || []).map(b => b.text || "").join("\n").trim();
+No text outside the JSON object, no markdown code fences, no commentary.`;
 }
 
 function prefaceSystemPrompt() {
@@ -156,6 +157,36 @@ Do not include any text outside the JSON object, no markdown code fences, no com
 
 // Shared by preface and comment-reconciliation, both of which need
 // structured JSON back rather than manuscript HTML.
+// Claude is asked for multi-sentence (sometimes multi-paragraph) prose
+// inside JSON string values. It reliably escapes quotes/backslashes but
+// will sometimes emit a literal newline between paragraphs instead of the
+// `\n` escape sequence — valid-looking text, invalid JSON. Walk the raw
+// text tracking whether we're inside a string literal (toggling on
+// unescaped `"`) and escape any bare control character found there; JSON
+// structure (whitespace between tokens) is untouched since it's only ever
+// outside a string.
+function sanitizeJsonControlChars(text) {
+  let out = "";
+  let inString = false;
+  let escaped = false;
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i];
+    if (inString) {
+      if (escaped) { out += ch; escaped = false; continue; }
+      if (ch === "\\") { out += ch; escaped = true; continue; }
+      if (ch === "\"") { inString = false; out += ch; continue; }
+      if (ch === "\n") { out += "\\n"; continue; }
+      if (ch === "\r") { out += "\\r"; continue; }
+      if (ch === "\t") { out += "\\t"; continue; }
+      out += ch;
+    } else {
+      if (ch === "\"") inString = true;
+      out += ch;
+    }
+  }
+  return out;
+}
+
 async function callClaudeForJson(anthropicKey, systemPrompt, userContent, maxTokens, errorLabel) {
   const res = await fetch("https://api.anthropic.com/v1/messages", {
     method: "POST",
@@ -175,15 +206,24 @@ async function callClaudeForJson(anthropicKey, systemPrompt, userContent, maxTok
   if (!res.ok) throw new Error(anthropicErrorMessage(data));
   const raw = (data.content || []).map(b => b.text || "").join("\n").trim();
 
-  // Models sometimes wrap JSON in a code fence despite instructions not to —
-  // strip it defensively before parsing.
-  const jsonText = raw.replace(/^```(?:json)?\s*/i, "").replace(/```\s*$/, "").trim();
+  // Models sometimes wrap JSON in a code fence, or add stray text before/
+  // after the object, despite instructions not to — strip both defensively.
+  let jsonText = raw.replace(/^```(?:json)?\s*/i, "").replace(/```\s*$/, "").trim();
+  const firstBrace = jsonText.indexOf("{");
+  const lastBrace = jsonText.lastIndexOf("}");
+  if (firstBrace > 0 || lastBrace < jsonText.length - 1) {
+    if (firstBrace !== -1 && lastBrace > firstBrace) jsonText = jsonText.slice(firstBrace, lastBrace + 1);
+  }
+
   try { return JSON.parse(jsonText); }
-  catch (e) { throw new Error(`AI did not return valid JSON${errorLabel ? ` for ${errorLabel}` : ""}`); }
+  catch (e) {
+    try { return JSON.parse(sanitizeJsonControlChars(jsonText)); }
+    catch (e2) { throw new Error(`AI generation${errorLabel ? ` for ${errorLabel}` : ""} returned an unexpected response — please try again.`); }
+  }
 }
 
 async function callClaudeForPreface(anthropicKey, contextText) {
-  const parsed = await callClaudeForJson(anthropicKey, prefaceSystemPrompt(), contextText, 2000, "the preface");
+  const parsed = await callClaudeForJson(anthropicKey, prefaceSystemPrompt(), contextText, 3000, "the preface");
   const content = {};
   for (const key of PREFACE_FIELDS) content[key] = typeof parsed[key] === "string" ? parsed[key] : "";
   return content;
@@ -199,7 +239,7 @@ async function handlePreface(adminClient, anthropicKey, job, jobId) {
     adminClient.from("study_outcomes").select("*").eq("project_id", job.project_id),
     adminClient.from("study_references").select("*").eq("project_id", job.project_id),
   ]);
-  const contextText = buildContext(project, compound, outcomes || [], refs || []);
+  const contextText = buildContext(project, compound, outcomes || [], refs || [], job.input_ref?.metrics);
 
   await adminClient.from("ai_jobs").update({ stage: 2, pct: 40 }).eq("id", jobId);
   const content = await callClaudeForPreface(anthropicKey, contextText);
@@ -271,13 +311,18 @@ For EACH comment, decide:
 - conflicts_with: if category is "conflicting", the id of the comment it conflicts with, else null.
 - importance: your OWN assessment (low/medium/high/critical) of how important this feedback is to ` +
     `the paper's quality — independent of what the reviewer marked, and it may differ from it.
+- affected_section: which section of the paper actually needs to change to address this comment — ` +
+    `one of "Abstract", "Introduction", "Methods", "Results", "Discussion", "Conclusions", or ` +
+    `"General". This is YOUR determination of what needs editing, which may differ from the section ` +
+    `the practitioner was looking at when they left the comment (e.g. a comment left on the Abstract ` +
+    `might really require an Introduction edit).
 - recommended_action: one of "implement", "partially_implement", "discuss" (needs researcher ` +
     `judgement), or "decline".
 - recommendation: one or two sentences explaining your reasoning and, if actionable, what change ` +
     `to make.
 
 Return ONLY a JSON object: {"items": [{"comment_id": "...", "category": "...", ` +
-    `"duplicate_of": null, "conflicts_with": null, "importance": "...", ` +
+    `"duplicate_of": null, "conflicts_with": null, "importance": "...", "affected_section": "...", ` +
     `"recommended_action": "...", "recommendation": "..."}, ...]} — exactly one item per comment ` +
     `id given. No text outside the JSON, no markdown code fences.`;
 }
@@ -292,31 +337,38 @@ async function handleReconciliation(adminClient, anthropicKey, job, jobId) {
   const { data: cycle, error: cycleErr } = await adminClient
     .from("paper_review_cycles").select("id").eq("id", reviewCycleId)
     .eq("paper_id", job.paper_id).eq("org_id", job.org_id).single();
-  if (cycleErr || !cycle) throw new Error("Review cycle not found for this job's paper/organisation");
+  if (cycleErr || !cycle) throw new Error("This review cycle couldn't be found for this paper. Try refreshing the page and analyzing again.");
 
   const { data: reviews, error: reviewsErr } = await adminClient
     .from("paper_reviews").select("id, reviewer_email, reviewer_name")
     .eq("paper_id", job.paper_id).eq("review_cycle_id", reviewCycleId);
-  if (reviewsErr) throw new Error(reviewsErr.message);
+  if (reviewsErr) throw new Error("Couldn't load reviews for this cycle — please try again in a moment.");
   const reviewIds = (reviews || []).map(r => r.id);
-  if (!reviewIds.length) throw new Error("No reviews found for this review cycle");
+  if (!reviewIds.length) throw new Error("No practitioner reviews have been submitted for this review cycle yet — there's nothing to analyze until at least one reviewer submits.");
 
   const { data: comments, error: commentsErr } = await adminClient
     .from("paper_review_comments").select("*").in("review_id", reviewIds)
     .order("created_at", { ascending: true });
-  if (commentsErr) throw new Error(commentsErr.message);
-  if (!comments || !comments.length) throw new Error("No comments found for this review cycle — nothing to reconcile");
+  if (commentsErr) throw new Error("Couldn't load comments for this cycle — please try again in a moment.");
+  if (!comments || !comments.length) throw new Error("The submitted review(s) for this cycle don't include any comments — there's nothing to analyze. Ask reviewers to leave section comments, not just an overall recommendation.");
 
   const { data: draft } = await adminClient
-    .from("paper_drafts").select("html_content").eq("paper_id", job.paper_id)
+    .from("paper_drafts").select("html_content, narrative_content").eq("paper_id", job.paper_id)
     .order("updated_at", { ascending: false }).limit(1).maybeSingle();
 
   await adminClient.from("ai_jobs").update({ stage: 2, pct: 40 }).eq("id", jobId);
 
+  // narrative_content (the unified template's AI-editable prose) takes
+  // priority; html_content is only present on legacy/pre-unification drafts.
+  const narrativeText = draft?.narrative_content
+    ? NARRATIVE_FIELDS.map(k => draft.narrative_content[k] ? `${k.toUpperCase()}: ${draft.narrative_content[k]}` : "").filter(Boolean).join("\n\n")
+    : "";
+  const draftContextText = narrativeText || stripHtmlToText(draft?.html_content).slice(0, 4000) || "(no draft content yet)";
+
   const reviewerById = Object.fromEntries((reviews || []).map(r => [r.id, r.reviewer_name || r.reviewer_email]));
   const contextLines = [
     `Current draft content (for context):`,
-    stripHtmlToText(draft?.html_content).slice(0, 4000) || "(no draft content yet)",
+    draftContextText,
     "",
     `Comments (${comments.length}):`,
     ...comments.map((c, i) =>
@@ -345,6 +397,7 @@ async function handleReconciliation(adminClient, anthropicKey, job, jobId) {
       duplicate_of_comment_id: (category === "duplicate" && commentIds.has(it.duplicate_of) && it.duplicate_of !== c.id) ? it.duplicate_of : null,
       conflicts_with_comment_id: (category === "conflicting" && commentIds.has(it.conflicts_with) && it.conflicts_with !== c.id) ? it.conflicts_with : null,
       ai_importance: RECONCILE_IMPORTANCE.includes(it.importance) ? it.importance : null,
+      ai_affected_section: RECONCILE_SECTIONS.includes(it.affected_section) ? it.affected_section : (c.section_key || "General"),
       ai_recommended_action: RECONCILE_ACTIONS.includes(it.recommended_action) ? it.recommended_action : null,
       ai_recommendation: typeof it.recommendation === "string" ? it.recommendation : null,
     };
@@ -377,19 +430,29 @@ async function handleReconciliation(adminClient, anthropicKey, job, jobId) {
   return { success: true, reconciliationId: reconciliation.id };
 }
 
-function reconciliationApplySystemPrompt(sections) {
-  return `You are revising a nutraceutical evidence-synthesis research paper draft for the NEP ` +
-    `Platform, incorporating a specific list of ACCEPTED practitioner feedback. You will be given ` +
-    `the current draft content (HTML) and a list of accepted change instructions.
+function reconciliationApplySystemPrompt() {
+  return `You are revising the NARRATIVE sections of a nutraceutical evidence-synthesis research ` +
+    `paper draft for the NEP Platform, incorporating a specific list of ACCEPTED practitioner ` +
+    `feedback. You will be given the current narrative content as a JSON object with four keys — ` +
+    `"introduction", "discussion" (Evidence Strength/Consistency interpretation), "bioavailability" ` +
+    `(Bioavailability/Formulation considerations — both "discussion" and "bioavailability" are ` +
+    `subsections of the paper's overall Discussion section) and "conclusions" — plus a list of ` +
+    `accepted change instructions, each tagged with which section it affects.
 
-Produce a revised version of the draft that incorporates every accepted item. Preserve everything ` +
-    `else unchanged. Still produce ONLY these sections: ${sections.join(", ")} — do NOT add ` +
-    `Results, Analysis, Discussion, or Conclusions under any circumstance, even if a comment asks ` +
-    `about them (treat that as out of scope for this stage instead of writing it).
+Only apply changes tagged "Introduction", "Discussion", or "Conclusions" — those map to the four ` +
+    `fields above (a "Discussion"-tagged change may require editing "discussion", "bioavailability", ` +
+    `or both, whichever subsection it actually concerns). If a change is tagged "Abstract", ` +
+    `"Methods", "Results", or "General", leave all four fields exactly as given; that change affects ` +
+    `computed data or a section you don't control, not narrative prose, and must be handled elsewhere.
 
-Output clean semantic HTML only: <h1> for the paper title, <h2> for each major section heading, ` +
-    `<p> for paragraphs, <ul>/<li> for lists where useful. No <html>/<head>/<body> tags, no ` +
-    `markdown, no commentary outside the HTML.`;
+Preserve everything else in a field unchanged except what a change instruction requires. Never ` +
+    `invent, alter, or contradict a specific number, effect size, or statistic — if a change asks ` +
+    `you to correct a number, do not comply; leave the field unchanged (numbers are corrected by ` +
+    `fixing the underlying data, not by editing prose).
+
+Return ONLY a JSON object with exactly the keys "introduction", "discussion", "bioavailability", ` +
+    `"conclusions" — each the full revised (or unchanged) text of that field, flowing academic ` +
+    `prose, no headings, no markdown, no commentary outside the JSON object.`;
 }
 
 async function handleReconciliationApply(adminClient, anthropicKey, job, jobId) {
@@ -400,41 +463,57 @@ async function handleReconciliationApply(adminClient, anthropicKey, job, jobId) 
   const { data: reconciliation, error: reconErr } = await adminClient
     .from("comment_reconciliations").select("*").eq("id", reconciliationId)
     .eq("paper_id", job.paper_id).eq("org_id", job.org_id).single();
-  if (reconErr || !reconciliation) throw new Error("Reconciliation not found for this job's paper/organisation");
+  if (reconErr || !reconciliation) throw new Error("This reconciliation analysis couldn't be found. Try running Analyze Feedback again.");
 
   const { data: accepted, error: acceptedErr } = await adminClient
     .from("comment_change_map")
     .select("*, paper_review_comments!comment_change_map_comment_id_fkey(section_key, comment_text)")
     .eq("reconciliation_id", reconciliationId).eq("researcher_decision", "accepted");
-  if (acceptedErr) throw new Error(acceptedErr.message);
-  if (!accepted || !accepted.length) throw new Error("No accepted recommendations to apply");
+  if (acceptedErr) throw new Error("Couldn't load the accepted recommendations — please try again in a moment.");
+  if (!accepted || !accepted.length) throw new Error("Accept at least one recommendation before generating the next draft.");
 
   const { data: draft, error: draftFetchErr } = await adminClient
     .from("paper_drafts").select("*").eq("paper_id", job.paper_id)
     .order("updated_at", { ascending: false }).limit(1).maybeSingle();
-  if (draftFetchErr || !draft) throw new Error("No draft available to revise");
+  if (draftFetchErr || !draft) throw new Error("No existing draft was found to revise for this paper.");
 
   await adminClient.from("ai_jobs").update({ stage: 2, pct: 40 }).eq("id", jobId);
 
-  const sections = draft.metadata?.sections?.length ? draft.metadata.sections : DEFAULT_SECTIONS;
-  const changeLines = accepted.map((a, i) =>
-    `${i + 1}. [${a.paper_review_comments?.section_key || "General"}] ${a.paper_review_comments?.comment_text} — ` +
-    `action: ${a.ai_recommended_action || "implement"}${a.ai_recommendation ? ` (${a.ai_recommendation})` : ""}`);
-  const userContent = `Current draft (HTML):\n${draft.html_content}\n\nAccepted feedback to incorporate:\n${changeLines.join("\n")}`;
-
-  const res = await fetch("https://api.anthropic.com/v1/messages", {
-    method: "POST",
-    headers: { "Content-Type": "application/json", "anthropic-version": "2023-06-01", "x-api-key": anthropicKey },
-    body: JSON.stringify({
-      model: ANTHROPIC_MODEL, max_tokens: 4000,
-      system: reconciliationApplySystemPrompt(sections),
-      messages: [{ role: "user", content: userContent }],
-    }),
+  // Section-gate: only feedback whose affected section is AI-editable
+  // narrative gets applied here. Anything targeting Abstract/Methods/Results/
+  // General is accepted-but-not-yet-implemented — it requires correcting the
+  // underlying outcome/study data, not an AI prose edit, so it must not be
+  // marked implemented_in_draft_id (which would falsely claim it was applied).
+  const narrativeAccepted = accepted.filter(a => {
+    const section = a.ai_affected_section || a.paper_review_comments?.section_key || "General";
+    return NARRATIVE_EDITABLE_SECTIONS.includes(section);
   });
-  const data = await res.json();
-  if (!res.ok) throw new Error(anthropicErrorMessage(data));
-  const html = (data.content || []).map(b => b.text || "").join("\n").trim();
-  const { cleaned } = stripDisallowedSections(html);
+  if (!narrativeAccepted.length) {
+    throw new Error(
+      "The accepted recommendation(s) only affect Abstract/Methods/Results content, which is " +
+      "generated from your study data, not AI prose — there's nothing for AI to apply. Correct " +
+      "the underlying outcome/study data instead, then the numbers will update automatically."
+    );
+  }
+
+  const currentNarrative = draft.narrative_content || {};
+  const changeLines = narrativeAccepted.map((a, i) =>
+    `${i + 1}. [${a.ai_affected_section || a.paper_review_comments?.section_key || "General"}] ` +
+    `${a.paper_review_comments?.comment_text} — action: ${a.ai_recommended_action || "implement"}` +
+    `${a.ai_recommendation ? ` (${a.ai_recommendation})` : ""}`);
+  const userContent =
+    `Current narrative content (JSON):\n${JSON.stringify({
+      introduction: currentNarrative.introduction || "", discussion: currentNarrative.discussion || "",
+      conclusions: currentNarrative.conclusions || "",
+    })}\n\nAccepted feedback to incorporate:\n${changeLines.join("\n")}`;
+
+  const revisedNarrative = await callClaudeForJson(
+    anthropicKey, reconciliationApplySystemPrompt(), userContent, 4000, "the revised narrative"
+  );
+  const narrativeContent = {};
+  for (const key of NARRATIVE_FIELDS) {
+    narrativeContent[key] = typeof revisedNarrative[key] === "string" ? revisedNarrative[key] : (currentNarrative[key] || "");
+  }
 
   await adminClient.from("ai_jobs").update({ stage: 3, pct: 70 }).eq("id", jobId);
 
@@ -449,17 +528,23 @@ async function handleReconciliationApply(adminClient, anthropicKey, job, jobId) 
       paper_id: job.paper_id, org_id: job.org_id,
       source_version_id: draft.source_version_id, source_version_number: draft.source_version_number,
       next_version_number: nextVersionNumber,
-      html_content: cleaned, title: draft.title, compound: draft.compound,
-      notes: `Generated from AI comment reconciliation (${accepted.length} accepted item(s) applied)`,
+      narrative_content: narrativeContent, title: draft.title, compound: draft.compound,
+      notes: `Generated from AI comment reconciliation (${narrativeAccepted.length} of ${accepted.length} accepted item(s) applied — the rest require underlying data corrections)`,
       metadata: draft.metadata || {},
       source: "reconciliation", ai_job_id: jobId, created_by: job.created_by,
+      based_on_draft_id: draft.id,
+      // preface_id intentionally left null here — backfilled below, exactly
+      // once, from the freshly regenerated preface (migration 022's
+      // "may be filled in exactly once from null" invariant), rather than
+      // carrying forward the OLD draft's preface_id (which the guard trigger
+      // would then forbid ever correcting to the new one).
     })
     .select().single();
   if (newDraftErr) throw new Error(`Failed to create revised draft: ${newDraftErr.message}`);
 
-  const acceptedIds = accepted.map(a => a.id);
+  const narrativeAcceptedIds = narrativeAccepted.map(a => a.id);
   const { error: updateMapErr } = await adminClient
-    .from("comment_change_map").update({ implemented_in_draft_id: newDraft.id }).in("id", acceptedIds);
+    .from("comment_change_map").update({ implemented_in_draft_id: newDraft.id }).in("id", narrativeAcceptedIds);
   if (updateMapErr) throw new Error(`Draft created but failed to update traceability: ${updateMapErr.message}`);
 
   await adminClient.from("comment_reconciliations").update({ applied_draft_id: newDraft.id }).eq("id", reconciliationId);
@@ -487,6 +572,9 @@ async function handleReconciliationApply(adminClient, anthropicKey, job, jobId) 
       if (prefaceJobErr) throw new Error(prefaceJobErr.message);
       const prefaceResult = await handlePreface(adminClient, anthropicKey, prefaceJob, prefaceJob.id);
       prefaceId = prefaceResult.prefaceId;
+      if (prefaceId) {
+        await adminClient.from("paper_drafts").update({ preface_id: prefaceId }).eq("id", newDraft.id);
+      }
     }
   } catch (e) {
     console.error("[ai-generate] auto preface regeneration after reconciliation failed", e);
@@ -517,7 +605,7 @@ serve(async (req: Request) => {
     if (!jobId) throw new Error("Missing required field: jobId");
 
     const anthropicKey = Deno.env.get("ANTHROPIC_API_KEY");
-    if (!anthropicKey) throw new Error("ANTHROPIC_API_KEY not configured in Edge Function secrets");
+    if (!anthropicKey) throw new Error("AI generation isn't configured on this platform yet — contact your administrator (ANTHROPIC_API_KEY secret is missing).");
 
     // Load the job — it was created by the caller's own authenticated,
     // RLS-scoped session, so org_id/project_id here are already trustworthy.
@@ -543,6 +631,13 @@ serve(async (req: Request) => {
       return new Response(JSON.stringify(result), { headers: { ...corsHeaders, "Content-Type": "application/json" } });
     }
 
+    // job_type === "draft_sections": generate ONLY the AI-editable narrative
+    // (introduction/discussion/conclusions), grounded in the client's already-
+    // computed WS/ESS metrics. This does not touch papers/paper_drafts at all
+    // — buildDocxBlob (src/App.jsx) is the one place a draft's computed
+    // Abstract/Results/Methods content and file bytes get assembled and
+    // persisted; this job just supplies the narrative prose it drops in.
+    //
     // Defence in depth: confirm the project actually belongs to this job's
     // org before reading anything from it — closes off a service-role read
     // of arbitrary org data via a tampered project_id.
@@ -556,84 +651,23 @@ serve(async (req: Request) => {
       adminClient.from("study_references").select("*").eq("project_id", job.project_id),
     ]);
 
-    const sections = (job.input_ref?.sections?.length ? job.input_ref.sections : DEFAULT_SECTIONS);
-    const contextText = buildContext(project, compound, outcomes || [], refs || []);
+    const contextText = buildContext(project, compound, outcomes || [], refs || [], job.input_ref?.metrics);
 
     await adminClient.from("ai_jobs").update({ stage: 2, pct: 40 }).eq("id", jobId);
 
-    let html = await callClaude(anthropicKey, sections, contextText, false);
-    let { cleaned, stripped } = stripDisallowedSections(html);
-    if (stripped.length) {
-      // One retry with a stronger reminder before falling back to the
-      // stripped result — mirrors the brief's "reject/retry" requirement
-      // without an unbounded loop.
-      html = await callClaude(anthropicKey, sections, contextText, true);
-      ({ cleaned, stripped } = stripDisallowedSections(html));
-    }
-
-    await adminClient.from("ai_jobs").update({ stage: 3, pct: 70 }).eq("id", jobId);
-
-    // Extract a title from the first <h1> for the papers/paper_drafts title field.
-    const titleMatch = cleaned.match(/<h1[^>]*>(.*?)<\/h1>/i);
-    const title = (titleMatch ? titleMatch[1].replace(/<[^>]+>/g, "").trim() : "") ||
-      project.paper_title || `${compound?.compound_name || "Untitled"} Evidence Synthesis`;
-    const compoundName = compound?.compound_name || "";
-
-    let paperId = job.paper_id;
-    let sourceVersionId = null;
-    let sourceVersionNumber = null;
-    let nextVersionNumber = 1;
-
-    if (paperId) {
-      const { data: currentVersion } = await adminClient
-        .from("paper_versions").select("id, version_number")
-        .eq("paper_id", paperId).eq("is_current", true).maybeSingle();
-      if (currentVersion) {
-        sourceVersionId = currentVersion.id;
-        sourceVersionNumber = currentVersion.version_number;
-      }
-      const { data: maxRow } = await adminClient
-        .from("paper_versions").select("version_number")
-        .eq("paper_id", paperId).order("version_number", { ascending: false }).limit(1).maybeSingle();
-      nextVersionNumber = (maxRow?.version_number || 0) + 1;
-    } else {
-      const { data: newPaper, error: paperErr } = await adminClient
-        .from("papers")
-        .insert({ org_id: job.org_id, project_id: job.project_id, title, compound: compoundName, current_version: 0, created_by: job.created_by })
-        .select().single();
-      if (paperErr) throw new Error(`Failed to create paper: ${paperErr.message}`);
-      paperId = newPaper.id;
-    }
-
-    const { data: draft, error: draftErr } = await adminClient
-      .from("paper_drafts")
-      .insert({
-        paper_id: paperId,
-        org_id: job.org_id,
-        source_version_id: sourceVersionId,
-        source_version_number: sourceVersionNumber,
-        next_version_number: nextVersionNumber,
-        html_content: cleaned,
-        title,
-        compound: compoundName,
-        notes: "Generated by AI draft assistant" + (stripped.length ? ` (removed ${stripped.length} disallowed section(s): ${stripped.join(", ")})` : ""),
-        metadata: { sections },
-        source: "ai_draft",
-        ai_job_id: jobId,
-        created_by: job.created_by,
-      })
-      .select().single();
-    if (draftErr) throw new Error(`Failed to create draft: ${draftErr.message}`);
+    const parsed = await callClaudeForJson(anthropicKey, narrativeSystemPrompt(), contextText, 4000, "the draft narrative");
+    const narrativeContent = {};
+    for (const key of NARRATIVE_FIELDS) narrativeContent[key] = typeof parsed[key] === "string" ? parsed[key] : "";
 
     await adminClient.from("ai_jobs").update({
       status: "done", stage: 3, pct: 100,
       model: ANTHROPIC_MODEL, prompt_version: PROMPT_VERSION_DRAFT,
-      output_ref: { paperId, draftId: draft.id },
+      output_ref: { paperId: job.paper_id || null, narrativeContent },
       completed_at: new Date().toISOString(),
     }).eq("id", jobId);
 
     return new Response(
-      JSON.stringify({ success: true, paperId, draftId: draft.id }),
+      JSON.stringify({ success: true, paperId: job.paper_id || null, narrativeContent }),
       { headers: { ...corsHeaders, "Content-Type": "application/json" } }
     );
   } catch (e) {

@@ -5890,93 +5890,108 @@ const TemplatePreviewPanel = () => {
    Falls back gracefully to skeleton if API unavailable.
 ────────────────────────────────────────────────────────────────────── */
 
-/* ── Anthropic API call for narrative expansion ── */
-const expandNarrative = async (compound, outcomes, project, metrics) => {
-  // Skip API call — use deterministic fallback (API not deployed)
-  const _skipApi = true;
+// Lightweight standalone version of buildDocxBlob's own scoring block, for
+// callers (preface generation) that need grounding metrics but don't have a
+// draft/docx to build yet. Deliberately duplicated rather than shared with
+// buildDocxBlob's internals — those variables feed hundreds of lines of
+// table-building further down that file and aren't safe to extract without
+// risking that large, working function. Do not change the formula here
+// without mirroring it in buildDocxBlob (CLAUDE.md: scoring engine —
+// verified against the Excel model, changes require explicit instruction).
+const computeEvidenceMetrics = (outcomes, project) => {
+  const safeOutcomes = outcomes.map(o=>({ ...o, _ws: o._ws!=null ? Number(o._ws) : null }));
+  const wsVals = safeOutcomes.map(o=>o._ws).filter(x=>x!=null&&!isNaN(x)&&x>0);
+  const ess    = wsVals.length ? wsVals.reduce((a,b)=>a+b,0)/wsVals.length : 0;
+  const essC   = ess>=12?"Very Strong":ess>=9?"Strong":ess>=6?"Moderate":"Weak";
+  const nImp   = safeOutcomes.filter(o=>o.direction==="Improved").length;
+  const cons   = outcomes.length ? nImp/outcomes.length : 0;
+  const consC  = cons>=0.8?"Highly Consistent":cons>=0.5?"Mixed":"Inconsistent";
+  const grade  = ess>=9&&cons>=0.8?"Moderate–High":ess>=6?"Moderate":"Low–Moderate";
+  const studies = [...new Set(outcomes.map(o=>o.study_ref_id).filter(Boolean))];
+  const totalParts = studies.reduce((s,ref)=>{
+    const r=outcomes.find(o=>o.study_ref_id===ref);
+    return s+(Number(r?.sample_n)||0);
+  },0);
+  const topOutcome = [...safeOutcomes].filter(o=>o._ws!=null).sort((a,b)=>b._ws-a._ws)[0];
+  return {
+    nStudies: studies.length, parts: totalParts, nOutcomes: outcomes.length,
+    ess: Number(ess)||0, essC, cons, consC, grade,
+    topOutcome: topOutcome ? `${topOutcome.outcome_name} (WS=${topOutcome._ws?.toFixed?.(1)||topOutcome._ws})` : "",
+    journal: project?.target_journal||"",
+    outcomes: outcomes.slice(0,20).map(o=>({
+      name: o.outcome_name, direction: o.direction, significance: o.significance,
+      ws: o._ws!=null ? Number(o._ws) : null, n: o.sample_n, mcidMet: o.mcid_met==="Yes",
+    })),
+  };
+};
+
+// Feature #3: "generate preface before draft generation" / "regenerate
+// preface whenever major revisions happen" — a single shared entry point so
+// every draft-producing action (first generation, regenerate, file replace)
+// keeps the preface in sync the same way, instead of each call site
+// reimplementing it. Reconciliation-apply is the one exception — it already
+// regenerates + links its own preface server-side (ai-generate edge
+// function), so it doesn't call this.
+// Best-effort: a failure here must never break the draft action that
+// triggered it — the draft is the primary deliverable, so failures are
+// caught, toasted if possible, and swallowed rather than re-thrown.
+async function autoGeneratePreface(project, outcomes, paperId, draftId, toast) {
+  try {
+    const metrics = computeEvidenceMetrics(outcomes, project);
+    const result = await API.generatePreface(project.id, { paperId, metrics });
+    if (result?.prefaceId && draftId) {
+      // Only ever set once from null (identity-guard trigger, migration
+      // 022) — already-linked drafts silently no-op here, which is correct.
+      await API.updatePaperDraft(draftId, { prefaceId: result.prefaceId }).catch(()=>{});
+    }
+    return result;
+  } catch (e) {
+    console.warn('[autoGeneratePreface]', e.message);
+    if (toast) toast.error("Draft saved, but the preface couldn't be generated: " + (e.message||"unknown error"));
+    return null;
+  }
+}
+
+/* ── AI narrative generation, via the unified ai-generate pipeline (same ── */
+/* one draft/preface/reconciliation all share) — falls back to a rich       */
+/* deterministic template if the AI call fails or times out.                */
+const expandNarrative = async (compound, outcomes, project, metrics, paperId=null, onProgress=null) => {
   const name     = compound.compound_name || "the compound";
   const sci      = compound.scientific_name ? `(${compound.scientific_name})` : "";
   const extract  = compound.extract_form   || "standardised extract";
   const std      = compound.standardisation|| "";
   const dose     = compound.dose_range     || "";
   const duration = compound.duration_range || "";
-  const journal  = metrics.journal || "a peer-reviewed nutraceutical journal";
-
-  const outcomeList = outcomes.slice(0,8).map(o=>
-    `${o.outcome_name||"outcome"} (${o.direction||"—"}, ${o.significance||"—"}, WS=${o._ws!=null?(Number(o._ws)||0).toFixed(1):"?"}, n=${o.sample_n||"?"})`
-  ).join("; ");
 
   const sigOutcomes = outcomes.filter(o=>o.significance==="Significant");
   const topOutcome  = sigOutcomes[0]?.outcome_name || outcomes[0]?.outcome_name || "the primary outcome";
   const mcidMet     = outcomes.filter(o=>o.mcid_met==="Yes").length;
 
   try {
-    if(_skipApi) throw new Error("Using deterministic fallback");
-    const res = await fetch("/api/claude", {
-      method:"POST",
-      headers:{
-        "Content-Type":"application/json",
-        "anthropic-version":"2023-06-01",
-        
-      },
-      body: JSON.stringify({
-        max_tokens: 4500,
-        messages:[{role:"user", content:
-`You are a scientific medical writer producing a publication-ready nutraceutical evidence synthesis paper for ${journal}.
-
-COMPOUND: ${name} ${sci}
-EXTRACT: ${extract}${std?`, standardised to ${std}`:""}
-DOSE/DURATION: ${dose||"variable"}${duration?` for ${duration}`:""}
-ESS: ${(Number(metrics.ess)||0).toFixed(2)}/15.0 (${metrics.essC||"—"})
-GRADE estimate: ${metrics.gradeC||"—"}
-Studies: ${metrics.nStudies}, Participants: ${metrics.parts?.toLocaleString()||"—"}
-Outcomes: ${outcomeList}
-MCID met: ${mcidMet}/${outcomes.length}
-Consistency: ${metrics.consC||"—"}
-
-Write the following sections. Use formal academic language. Each section must be comprehensive and publication-ready. Do NOT use placeholders.
-
-=== INTRODUCTION (600-700 words) ===
-Paragraph 1 (100-120w): Global health burden of the conditions studied (${topOutcome} and related outcomes). Cite epidemiological significance.
-Paragraph 2 (120-140w): Limitations of conventional pharmacological approaches — side effects, cost, patient compliance issues.
-Paragraph 3 (150-180w): ${name} ${sci} — botanical origin, traditional use in Ayurvedic/traditional medicine, active constituents (${std||"key phytochemicals"}), proposed mechanisms of action.
-Paragraph 4 (120-140w): Existing clinical evidence landscape — what systematic reviews exist, what gaps remain.
-Paragraph 5 (100-120w): Rationale for this synthesis — why the NEP Weighted Scoring Framework provides value, study objectives.
-
-=== DISCUSSION (750-900 words) ===
-Paragraph 1 (150-180w): Interpretation of ESS ${(Number(metrics.ess)||0).toFixed(2)} and ${metrics.essC||""} classification in clinical context. What this means for practitioners.
-Paragraph 2 (150-180w): Key findings for ${topOutcome} — effect sizes, clinical meaningfulness, MCID thresholds. Compare to existing meta-analyses if any.
-Paragraph 3 (120-150w): Bioavailability and formulation considerations — how ${extract}${std?` standardised to ${std}`:""} compares to other preparations. Dose-response relationship at ${dose||"studied doses"}.
-Paragraph 4 (120-150w): Risk of bias analysis — what the bias penalty scores mean, quality of included studies, limitations of the evidence base.
-Paragraph 5 (100-120w): Limitations of this synthesis — database coverage, publication bias, heterogeneity, generalisability.
-Paragraph 6 (80-100w): Future research directions — what RCTs are needed, optimal dosing, population subgroups, long-term safety.
-
-=== CONCLUSIONS (150-180 words) ===
-A cohesive paragraph summarising: ESS classification, primary outcome findings, clinical grade estimate, key caveats, and a clear recommendation statement for clinicians and researchers.
-
-Format: Return each section with its header on a line by itself (e.g. "INTRODUCTION", "DISCUSSION", "CONCLUSIONS"), then the text. No markdown formatting, no bullet points — flowing academic prose only.`
-        }]
-      }),
-      signal: AbortSignal.timeout(45000),
+    const outcomesForContext = outcomes.slice(0,20).map(o=>({
+      name: o.outcome_name, direction: o.direction, significance: o.significance,
+      ws: o._ws!=null ? Number(o._ws) : null, n: o.sample_n, mcidMet: o.mcid_met==="Yes",
+    }));
+    // Real server-side progress (2 checkpoints this job type reports before
+    // completion) — not a client-side animation with an invented timeline.
+    const reportProgress = onProgress ? (job) => {
+      if (job.status === "error") return;
+      const msg = job.pct >= 100 ? "AI narrative generation complete"
+        : job.stage >= 2 ? "Generating narrative with AI (this can take 15–30s)…"
+        : "Preparing evidence context for AI…";
+      onProgress(msg, job.pct || 0);
+    } : null;
+    const result = await API.generateAIDraft(project?.id, {
+      paperId, metrics: { ...metrics, outcomes: outcomesForContext }, onProgress: reportProgress,
     });
-
-    if(!res.ok) throw new Error(`API ${res.status}`);
-    const data = await res.json();
-    const text = data.content?.[0]?.text?.trim()||"";
-
-    // Parse sections
-    const parseSection = (label) => {
-      const re = new RegExp(`${label}\\n([\\s\\S]*?)(?=\\n(?:INTRODUCTION|DISCUSSION|CONCLUSIONS)\\n|$)`, "i");
-      const m = text.match(re);
-      return m ? m[1].trim() : "";
-    };
-
+    const nc = result.narrativeContent || {};
+    if (!nc.introduction && !nc.discussion && !nc.conclusions) throw new Error("AI returned no narrative content");
     return {
-      intro:       parseSection("INTRODUCTION"),
-      discussion:  parseSection("DISCUSSION"),
-      conclusions: parseSection("CONCLUSIONS"),
+      intro:          nc.introduction  || "",
+      discussion:     nc.discussion    || "",
+      bioavailability:nc.bioavailability|| "",
+      conclusions:    nc.conclusions   || "",
     };
-
   } catch(e) {
     console.warn("expandNarrative failed:", e.message);
     // Rich deterministic fallback (~3,000-4,000 words total document)
@@ -6604,7 +6619,7 @@ const buildPaperHtml = (project, compound, outcomes, refs) => {
   return html;
 };
 
-const buildDocxBlob = async (project, compound, outcomes, refs, onProgress) => {
+const buildDocxBlob = async (project, compound, outcomes, refs, onProgress, paperId=null, precomputedNarrative=null) => {
 
   /* ── Scoring ── */
   const safeOutcomes = outcomes.map(o=>({
@@ -6650,8 +6665,8 @@ const buildDocxBlob = async (project, compound, outcomes, refs, onProgress) => {
   const compDose    = compound?.dose_range || outcomes.map(o=>o.dosage?`${o.dosage}${o.dose_unit||""}`:"").filter(Boolean).join(", ") || "";
   const compDur     = compound?.duration_range || "";
 
-  /* ── Stage 1: AI expansion ── */
-  if(onProgress) onProgress("Stage 1: AI expansion (~20s)\u2026");
+  /* ── Stage 1: computed skeleton (metrics/tables) — synchronous, real ── */
+  if(onProgress) onProgress("Computing evidence metrics and building tables\u2026", 10);
   const metrics = {
     nStudies:studies.length, parts:totalParts, nOutcomes:outcomes.length,
     nImp, nSig, ess:Number(ess)||0, essC, cons, consC, clin, clinC,
@@ -6659,8 +6674,17 @@ const buildDocxBlob = async (project, compound, outcomes, refs, onProgress) => {
     topOutcome: topOutcome ? `${topOutcome.outcome_name} (WS=${topOutcome._ws?.toFixed?.(1)||topOutcome._ws}, ES=${topOutcome.es_value||""}${topOutcome.es_type||""}, p=${topOutcome.p_value||"?"})` : "",
     journal: project?.target_journal||"",
   };
-  const expanded = await expandNarrative(compound, outcomes, project, metrics);
-  if(onProgress) onProgress("Stage 2: Building document\u2026");
+  // A caller that already has AI-revised narrative (e.g. reconciliation
+  // apply, which gets it from the server) supplies it directly \u2014 skips
+  // re-calling the AI for content that's already been generated/revised.
+  const expanded = precomputedNarrative ? {
+    intro: precomputedNarrative.introduction || "",
+    discussion: precomputedNarrative.discussion || "",
+    bioavailability: precomputedNarrative.bioavailability || "",
+    conclusions: precomputedNarrative.conclusions || "",
+  } : await expandNarrative(compound, outcomes, project, metrics, paperId,
+      onProgress ? (msg, jobPct) => onProgress(msg, 10 + Math.round((jobPct||0) * 0.8)) : null);
+  if(onProgress) onProgress("Assembling document (tables, references)\u2026", 95);
 
   /* ── Stage 2: Assemble Word XML ── */
   let body = "";
@@ -7291,9 +7315,29 @@ const buildDocxBlob = async (project, compound, outcomes, refs, onProgress) => {
     "word/settings.xml":         enc(settingsXml),
   }, { level: 6 });
 
-  return new Blob([zipData], {
+  const blob = new Blob([zipData], {
     type: "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
   });
+
+  // Real word count from the actual assembled document text (strip WordML
+  // tags, decode the few XML entities used above) — not a guess derived
+  // from compressed file size, which bears no reliable relationship to
+  // word count once fonts/tables/styles are factored in.
+  const plainText = body.replace(/<[^>]+>/g, " ")
+    .replace(/&amp;/g, "&").replace(/&lt;/g, "<").replace(/&gt;/g, ">")
+    .replace(/\s+/g, " ").trim();
+  const wordCount = plainText ? plainText.split(" ").length : 0;
+
+  if(onProgress) onProgress("Done", 100);
+
+  // Narrative returned alongside the rendered file so callers can persist it
+  // to paper_drafts.narrative_content — the one AI-editable part of a draft,
+  // kept separate from the computed bytes so it can be revised (reconciliation)
+  // or re-rendered without a fresh AI call.
+  return { blob, wordCount, narrative: {
+    introduction: expanded.intro || "", discussion: expanded.discussion || "",
+    bioavailability: expanded.bioavailability || "", conclusions: expanded.conclusions || "",
+  } };
 };
 
 
@@ -7952,7 +7996,10 @@ const PapersPanel = ({ papers, onUpdate, onPublish, onCreateRevision, onDelete, 
   };
 
   const loadPrefaces = (groupId) => {
-    API.listPrefaces(groupId).then(l=>setPrefaces(l||[])).catch(()=>setPrefaces([]));
+    API.listPrefaces(groupId).then(l=>setPrefaces(l||[])).catch(e=>{
+      toast.error(e.message||"Couldn't load the preface history — try refreshing the page.");
+      setPrefaces([]);
+    });
   };
 
   // Standalone regenerate — only used from the detail view of a paper that
@@ -8008,9 +8055,18 @@ const PapersPanel = ({ papers, onUpdate, onPublish, onCreateRevision, onDelete, 
   const [closingCycle, setClosingCycle] = useState(false);
 
   const loadReviewData = (groupId) => {
-    API.listReviewInvitations(groupId).then(l=>setReviewInvitations(l||[])).catch(()=>setReviewInvitations([]));
-    API.listPaperFeedback(groupId).then(l=>setPaperFeedback(l||[])).catch(()=>setPaperFeedback([]));
-    API.listReviewCycles(groupId).then(l=>setReviewCycles(l||[])).catch(()=>setReviewCycles([]));
+    API.listReviewInvitations(groupId).then(l=>setReviewInvitations(l||[])).catch(e=>{
+      toast.error(e.message||"Couldn't load reviewer invitations — try refreshing the page.");
+      setReviewInvitations([]);
+    });
+    API.listPaperFeedback(groupId).then(l=>setPaperFeedback(l||[])).catch(e=>{
+      toast.error(e.message||"Couldn't load practitioner feedback — try refreshing the page.");
+      setPaperFeedback([]);
+    });
+    API.listReviewCycles(groupId).then(l=>setReviewCycles(l||[])).catch(e=>{
+      toast.error(e.message||"Couldn't load review cycle history — try refreshing the page.");
+      setReviewCycles([]);
+    });
   };
 
   const currentCycle = reviewCycles[reviewCycles.length-1] || null;
@@ -8045,10 +8101,13 @@ const PapersPanel = ({ papers, onUpdate, onPublish, onCreateRevision, onDelete, 
   const latestReconciliation = reconciliations[0] || null;
 
   const loadReconciliation = async (groupId) => {
-    const list = await API.listReconciliations(groupId).catch(()=>[]);
+    let list;
+    try { list = await API.listReconciliations(groupId); }
+    catch(e) { toast.error(e.message||"Couldn't load AI reconciliation history — try refreshing the page."); list = []; }
     setReconciliations(list||[]);
     if(list?.[0]) {
-      API.getReconciliation(list[0].id).then(l=>setChangeMap(l||[])).catch(()=>setChangeMap([]));
+      try { setChangeMap((await API.getReconciliation(list[0].id))||[]); }
+      catch(e) { toast.error(e.message||"Couldn't load the reconciliation's comment details — try refreshing the page."); setChangeMap([]); }
     } else setChangeMap([]);
   };
 
@@ -8097,8 +8156,14 @@ const PapersPanel = ({ papers, onUpdate, onPublish, onCreateRevision, onDelete, 
   const [requestingValidation, setRequestingValidation] = useState(false);
 
   const loadValidations = (groupId) => {
-    API.getPostPublicationReport(groupId).then(setValidationReport).catch(()=>setValidationReport(null));
-    API.listPostPublicationValidations(groupId).then(l=>setPostPubValidations(l||[])).catch(()=>setPostPubValidations([]));
+    API.getPostPublicationReport(groupId).then(setValidationReport).catch(e=>{
+      toast.error(e.message||"Couldn't load the post-publication validation report — try refreshing the page.");
+      setValidationReport(null);
+    });
+    API.listPostPublicationValidations(groupId).then(l=>setPostPubValidations(l||[])).catch(e=>{
+      toast.error(e.message||"Couldn't load post-publication validations — try refreshing the page.");
+      setPostPubValidations([]);
+    });
   };
 
   useEffect(()=>{
@@ -8133,10 +8198,23 @@ const PapersPanel = ({ papers, onUpdate, onPublish, onCreateRevision, onDelete, 
   };
 
   const decideComment = async (commentId, status) => {
+    // Optimistic update — the dropdown reflects the new status immediately
+    // instead of waiting on a full reload round-trip, which otherwise made
+    // the control feel unresponsive.
+    const prev = paperFeedback;
+    setPaperFeedback(fb=>fb.map(r=>({
+      ...r,
+      paper_review_comments: (r.paper_review_comments||[]).map(c=>
+        c.id===commentId ? {...c, implementation_status:status} : c
+      ),
+    })));
     try{
       await API.updateCommentStatus(commentId, status);
       loadReviewData(paper.groupId);
-    }catch(e){ toast.error(e.message||"Failed to update comment"); }
+    }catch(e){
+      setPaperFeedback(prev);
+      toast.error(e.message||"Failed to update comment");
+    }
   };
 
   // Upload handler
@@ -8144,7 +8222,7 @@ const PapersPanel = ({ papers, onUpdate, onPublish, onCreateRevision, onDelete, 
     const file = e.target.files?.[0];
     if(!file || !paper) return;
     const reader = new FileReader();
-    reader.onload = (ev) => {
+    reader.onload = async (ev) => {
       const updated = {
         ...paper,
         fileName: file.name,
@@ -8154,8 +8232,12 @@ const PapersPanel = ({ papers, onUpdate, onPublish, onCreateRevision, onDelete, 
         updatedAt: Date.now(),
         history: [...(paper.history||[]), {date:Date.now(), action:"Uploaded edited version", fileName:file.name}],
       };
-      onUpdate(updated);
+      await onUpdate(updated);
       alert("✓ File uploaded and saved against v" + displayVersion(paper));
+      // Visible focus point: the Preface card's "🔄 Regenerate Preface"
+      // button flips to "Regenerating…" and the card content refreshes
+      // once done — same mechanism as clicking that button manually.
+      runGeneratePreface(paper.groupId);
     };
     reader.readAsDataURL(file);
     e.target.value = "";
@@ -8576,33 +8658,64 @@ const PapersPanel = ({ papers, onUpdate, onPublish, onCreateRevision, onDelete, 
 
             {paperFeedback.length===0?(
               <div style={{fontSize:12,color:T.text3,fontStyle:"italic"}}>No reviews submitted yet.</div>
-            ):(
-              <div style={{display:"flex",flexDirection:"column",gap:12}}>
-                {paperFeedback.map(r=>(
-                  <div key={r.id} style={{background:T.bg3,borderRadius:8,padding:12,border:`1px solid ${T.border}`}}>
-                    <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:6}}>
-                      <span style={{fontSize:12,fontWeight:600,color:"#F0F6FF"}}>{r.reviewer_email}</span>
-                      <Tag color={r.status==="submitted"?T.green:T.amber}>{r.status==="submitted"?(r.recommendation||"submitted"):"in progress"}</Tag>
-                    </div>
-                    {r.overall_comments&&(
-                      <div style={{fontSize:12,color:T.text2,marginBottom:8,lineHeight:1.5}}>{r.overall_comments}</div>
-                    )}
-                    {(r.paper_review_comments||[]).map(c=>(
-                      <div key={c.id} style={{padding:"6px 0",borderTop:`1px solid ${T.border}`}}>
-                        <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:3}}>
-                          <span style={{fontSize:11,color:T.text3}}>{c.section_key||"General"} · {c.importance}</span>
-                          <select value={c.implementation_status} onChange={e=>decideComment(c.id, e.target.value)}
-                            style={{fontSize:11,padding:"2px 6px"}}>
-                            {["pending","accepted","rejected","implemented"].map(s=><option key={s} value={s}>{s}</option>)}
-                          </select>
+            ):(()=>{
+              // Group by reviewer — paperFeedback is one row per review PASS
+              // (iteration), not per reviewer, so the same person can appear
+              // several times (a resumed/re-invited review, or a stale
+              // in-progress pass left over from an earlier cycle). Segregate
+              // by reviewer first, then only surface passes with actual
+              // content — an empty in-progress pass is noise, not signal.
+              const byReviewer = [];
+              paperFeedback.forEach(r=>{
+                let group = byReviewer.find(g=>g.email===r.reviewer_email);
+                if(!group){ group = {email:r.reviewer_email, name:r.reviewer_name, passes:[]}; byReviewer.push(group); }
+                group.passes.push(r);
+              });
+              return (
+                <div style={{display:"flex",flexDirection:"column",gap:12}}>
+                  {byReviewer.map(({email, name, passes})=>{
+                    const sorted = [...passes].sort((a,b)=>(a.iteration||0)-(b.iteration||0));
+                    const substantive = sorted.filter(r=>r.overall_comments || (r.paper_review_comments||[]).length>0);
+                    const activePass = sorted.find(r=>r.status!=="submitted");
+                    return (
+                      <div key={email} style={{background:T.bg3,borderRadius:8,padding:12,border:`1px solid ${T.border}`}}>
+                        <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:8}}>
+                          <span style={{fontSize:13,fontWeight:600,color:"#F0F6FF"}}>{name||email}</span>
+                          {activePass&&(
+                            <Tag color={T.amber}>Iteration {activePass.iteration||1} · in progress</Tag>
+                          )}
                         </div>
-                        <div style={{fontSize:12,color:"#DCE6F5"}}>{c.comment_text}</div>
+                        {substantive.length===0?(
+                          <div style={{fontSize:12,color:T.text3,fontStyle:"italic"}}>No comments submitted yet.</div>
+                        ):substantive.map((r,i)=>(
+                          <div key={r.id} style={{marginTop:i>0?10:0,paddingTop:i>0?10:0,borderTop:i>0?`1px solid ${T.border}`:"none"}}>
+                            <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:6}}>
+                              <span style={{fontSize:11,color:T.text3}}>Iteration {r.iteration||1}</span>
+                              <Tag color={r.status==="submitted"?T.green:T.amber}>{r.status==="submitted"?(r.recommendation||"submitted"):"in progress"}</Tag>
+                            </div>
+                            {r.overall_comments&&(
+                              <div style={{fontSize:12,color:T.text2,marginBottom:8,lineHeight:1.5}}>{r.overall_comments}</div>
+                            )}
+                            {(r.paper_review_comments||[]).map(c=>(
+                              <div key={c.id} style={{padding:"6px 0",borderTop:`1px solid ${T.border}`}}>
+                                <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:3}}>
+                                  <span style={{fontSize:11,color:T.text3}}>{c.section_key||"General"} · {c.importance}</span>
+                                  <select value={c.implementation_status} onChange={e=>decideComment(c.id, e.target.value)}
+                                    style={{fontSize:11,padding:"2px 6px"}}>
+                                    {["pending","accepted","rejected","implemented"].map(s=><option key={s} value={s}>{s}</option>)}
+                                  </select>
+                                </div>
+                                <div style={{fontSize:12,color:"#DCE6F5"}}>{c.comment_text}</div>
+                              </div>
+                            ))}
+                          </div>
+                        ))}
                       </div>
-                    ))}
-                  </div>
-                ))}
-              </div>
-            )}
+                    );
+                  })}
+                </div>
+              );
+            })()}
           </div>
         )}
 
@@ -9002,19 +9115,44 @@ const NotificationsPanel = () => {
 };
 
 
-const GenerationPanel = ({ outcomes, refs, compound, project, projectId, onBack, setPapers }) => {
+const GenerationPanel = ({ outcomes, refs, compound, project, projectId, onBack, setPapers, onViewPaper }) => {
   const [status, setStatus] = useState("idle"); // idle | running | done | error
   const [pct, setPct]       = useState(0);
   const [stage, setStage]   = useState(1);
   const [log, setLog]       = useState([]);
   const [docxBlob, setDocxBlob] = useState(null);
   const [fileName, setFileName] = useState("");
-  const [wordCount, setWordCount] = useState(5820);
+  const [wordCount, setWordCount] = useState(0);
+  const [savedPaper, setSavedPaper] = useState(null);   // the Papers row, once auto-save confirms
+  const [saveError, setSaveError] = useState(null);
+  const [elapsed, setElapsed] = useState(0);
   const toast  = useToast();
   const logRef = useRef(null);
 
   const n_out = outcomes.length;
   const ess   = score.ess(outcomes.map(o=>({_ws:Number(o._ws)||null})));
+
+  // The edge function only reports two checkpoints (10%/40%) before it
+  // finishes — the bar will hold steady for the whole Claude call (the
+  // dominant cost). An elapsed-time counter + pulsing fill communicate
+  // "still working" honestly instead of a percentage implying more
+  // granularity than the server actually provides.
+  useEffect(()=>{
+    if(status!=="running") return;
+    setElapsed(0);
+    const id = setInterval(()=>setElapsed(e=>e+1), 1000);
+    return ()=>clearInterval(id);
+  },[status]);
+
+  const pushLog = (msg, p, s) => {
+    setPct(p);
+    if(s) setStage(s);
+    setLog(prev=>{
+      const next=[...prev,{t:Date.now(),msg}];
+      setTimeout(()=>{if(logRef.current) logRef.current.scrollTop=logRef.current.scrollHeight;},0);
+      return next;
+    });
+  };
 
   const generate = async () => {
     setStatus("running");
@@ -9022,82 +9160,69 @@ const GenerationPanel = ({ outcomes, refs, compound, project, projectId, onBack,
     setPct(0);
     setStage(1);
     setDocxBlob(null);
+    setSavedPaper(null);
+    setSaveError(null);
 
     const name = (project?.paper_title||compound?.name||"NEP")
       .replace(/[^a-zA-Z0-9]+/g,"_").slice(0,60)+"_Evidence_Paper.docx";
     setFileName(name);
 
-    // Animation steps that run in parallel with the actual docx build
-    const animSteps = [
-      [600,  10, 1, "Validating evidence input…"],
-      [700,  22, 1, "Computing aggregated metrics…"],
-      [500,  34, 1, "Building Table 1 (study summary)…"],
-      [600,  44, 1, "Building Table 2 (outcome scores)…"],
-      [500,  54, 1, "Building Table 3 (compound metrics)…"],
-      [700,  60, 1, "Generating structured abstract…"],
-      [400,  62, 2, "Stage 1 complete (3,200 words) — assembling document…"],
-      [1100, 68, 2, "Expanding Introduction with SR landscape…"],
-      [950,  75, 2, "Expanding Discussion 4.1 — evidence strength…"],
-      [900,  81, 2, "Expanding Discussion 4.2 — bioavailability…"],
-      [850,  87, 2, "Expanding Discussion 4.3–4.6…"],
-      [700,  91, 2, "Generating Conclusions and priority areas…"],
-      [600,  94, 2, "Rendering .docx (Times New Roman, IMRaD)…"],
-      [500,  97, 2, "Running veracity audit…"],
-      [0,   100, 2, "Veracity audit: 39/39 checks passed ✓"],
-    ];
-
     try {
-      const [blob] = await Promise.all([
-        // Actual docx build (client-side, usually <3s)
-        buildDocxBlob(project, compound, outcomes, refs, ()=>{}),
-        // Animation runs concurrently (~9s total)
-        (async()=>{
-          for(const [ms, p, s, msg] of animSteps){
-            if(ms>0) await new Promise(r=>setTimeout(r,ms));
-            setPct(p);
-            setStage(s);
-            setLog(prev=>{
-              const next=[...prev,{t:Date.now(),msg}];
-              setTimeout(()=>{if(logRef.current) logRef.current.scrollTop=logRef.current.scrollHeight;},0);
-              return next;
-            });
-          }
-        })(),
-      ]);
+      // Real progress, tied to actual work: stage 1 (metrics/tables) is
+      // synchronous and near-instant; stage 2 (AI narrative) is a genuine
+      // network call to Claude that can take 15-30s — reported via polling
+      // the ai_jobs row it's tracked under, not a scripted animation.
+      const { blob, wordCount: realWordCount, narrative } = await buildDocxBlob(
+        project, compound, outcomes, refs,
+        (msg, p) => pushLog(msg, p, p < 15 ? 1 : 2),
+      );
 
-      const estWords = Math.max(5000, Math.round(blob.size / 5.5));
-      setWordCount(estWords);
+      setWordCount(realWordCount);
       setDocxBlob(blob);
       setStatus("done");
 
-      // Auto-save draft to Supabase in background
+      // Auto-save draft to Supabase — awaited (not fire-and-forget) so the
+      // "done" screen can honestly reflect whether it actually saved yet,
+      // instead of claiming success before the write is confirmed.
       if(setPapers && projectId){
-        const reader=new FileReader();
-        reader.onload=async()=>{
-          try{
-            const draftData={
-              title: project?.paper_title||(compound?.name||"")+" Evidence Synthesis",
-              compound: compound?.name||"",
-              htmlContent: "",
-              fileName: name,
-              fileData: reader.result,
-              fileSize: blob.size,
-              notes: "Generated "+new Date().toLocaleDateString("en-GB",{day:"2-digit",month:"short",year:"numeric",hour:"2-digit",minute:"2-digit"}),
-              metadata:{team:project?.team||[],affiliation:project?.affiliation||"",journal:project?.journal||""},
-            };
-            const saved=await API.createPaperDraft(projectId,draftData);
-            setPapers(prev=>{
-              const idx=prev.findIndex(p=>p.compound===saved.compound&&p.status==="draft");
-              if(idx>=0){const n=[...prev];n[idx]=saved;return n;}
-              return [...prev,saved];
-            });
-          }catch(ex){
-            console.warn("[Paper save]",ex);
-            toast.error("Draft generated but could not be saved — download it now to avoid losing it");
-          }
-        };
-        reader.readAsDataURL(blob);
+        try{
+          const fileData = await new Promise((resolve,reject)=>{
+            const reader=new FileReader();
+            reader.onload=()=>resolve(reader.result);
+            reader.onerror=reject;
+            reader.readAsDataURL(blob);
+          });
+          const draftData={
+            title: project?.paper_title||(compound?.name||"")+" Evidence Synthesis",
+            compound: compound?.name||"",
+            htmlContent: "",
+            narrativeContent: narrative,
+            fileName: name,
+            fileData, fileSize: blob.size,
+            notes: "Generated "+new Date().toLocaleDateString("en-GB",{day:"2-digit",month:"short",year:"numeric",hour:"2-digit",minute:"2-digit"}),
+            metadata:{team:project?.team||[],affiliation:project?.affiliation||"",journal:project?.journal||""},
+          };
+          // createPaperDraft (no existingPaperId passed here) always inserts
+          // a brand-new papers row — never matches/replaces an existing one
+          // by compound name, which previously undercounted the sidebar
+          // Papers badge whenever another draft for the same compound
+          // already existed (e.g. after repeated test generations).
+          const saved=await API.createPaperDraft(projectId,draftData);
+          setSavedPaper(saved);
+          setPapers(prev=>[...prev, saved]);
+          // Feature #3: "generate preface before draft generation" — here
+          // the draft has to exist first (createPaperDraft creates the
+          // papers row too), so this is "immediately after" rather than
+          // strictly before, but the preface still lands before the
+          // researcher ever leaves this screen.
+          autoGeneratePreface(project, outcomes, saved.groupId, saved.id, toast);
+        }catch(ex){
+          console.warn("[Paper save]",ex);
+          setSaveError(ex.message||"Unknown error");
+          toast.error("Draft generated but could not be saved — download it now to avoid losing it");
+        }
       } else if(!projectId){
+        setSaveError("No study selected");
         toast.error("No study selected — draft was not saved. Download it now to avoid losing it");
       }
     }catch(e){
@@ -9114,8 +9239,9 @@ const GenerationPanel = ({ outcomes, refs, compound, project, projectId, onBack,
         Ready to generate
       </h3>
       <p style={{fontSize:13,color:T.text3,marginBottom:24,maxWidth:400,margin:"0 auto 24px"}}>
-        Two-stage engine: skeleton (~5s) + document assembly (~25s).
-        Target: 5,000–8,000 words, IMRaD, Vancouver references.
+        Builds the computed Abstract/Results tables instantly, then generates
+        the Introduction/Discussion/Conclusions narrative with AI — that step
+        typically takes 15–30s.
       </p>
       <div style={{display:"flex",gap:8,justifyContent:"center",marginBottom:24}}>
         {[[`${n_out} outcomes`,T.teal],[`ESS ${(Number(ess)||0).toFixed(2)}`,T.amber],[`${refs.length} refs`,T.purple]]
@@ -9133,14 +9259,22 @@ const GenerationPanel = ({ outcomes, refs, compound, project, projectId, onBack,
       <div style={{marginBottom:16}}>
         <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:6}}>
           <span style={{fontSize:12,color:T.text2,fontWeight:500}}>
-            Stage {stage}: {stage===1?"Building skeleton…":"AI expansion…"}
+            Stage {stage}: {stage===1?"Building tables…":"AI narrative generation…"}
           </span>
-          <span style={{fontFamily:T.mono,fontSize:13,color:T.teal}}>{pct}%</span>
+          <span style={{fontFamily:T.mono,fontSize:13,color:T.teal}}>
+            {pct}% · {elapsed}s elapsed
+          </span>
         </div>
         <div style={{height:6,background:T.border,borderRadius:3,overflow:"hidden"}}>
           <div style={{height:"100%",background:T.teal,borderRadius:3,
-            width:`${pct}%`,transition:"width 0.4s ease"}}/>
+            width:`${Math.max(pct,4)}%`,transition:"width 0.4s ease",
+            animation:"pulse 1.4s ease infinite"}}/>
         </div>
+        {stage===2&&(
+          <div style={{fontSize:11,color:T.text3,marginTop:6}}>
+            Waiting on the AI response — this genuinely takes a while, it isn't stuck.
+          </div>
+        )}
       </div>
       <div ref={logRef} style={{height:240,overflowY:"auto",background:T.bg1,
         borderRadius:6,border:`1px solid ${T.border}`,padding:"10px 14px"}}>
@@ -9169,12 +9303,11 @@ const GenerationPanel = ({ outcomes, refs, compound, project, projectId, onBack,
           Manuscript generated
         </h3>
         <p style={{fontSize:12,color:T.text3}}>
-          39/39 veracity checks passed · ~{wordCount.toLocaleString()} words · 3 tables
+          {wordCount.toLocaleString()} words · 3 tables · {refs.length} reference{refs.length!==1?"s":""}
         </p>
       </div>
-      <div style={{display:"grid",gridTemplateColumns:"repeat(4,1fr)",gap:8,marginBottom:20}}>
-        {[["Word count",`~${wordCount.toLocaleString()}`,T.text0],
-          ["Veracity","39/39",T.green],
+      <div style={{display:"grid",gridTemplateColumns:"repeat(3,1fr)",gap:8,marginBottom:20}}>
+        {[["Word count",wordCount.toLocaleString(),T.text0],
           ["Tables","3",T.teal],
           ["References",refs.length,T.purple]].map(([l,v,c])=>(
           <div key={l} style={{textAlign:"center",background:T.bg3,borderRadius:6,
@@ -9185,15 +9318,39 @@ const GenerationPanel = ({ outcomes, refs, compound, project, projectId, onBack,
           </div>
         ))}
       </div>
+
+      {/* Honest save-status — the draft is auto-saved to Papers the moment
+          generation finishes, before the researcher clicks anything, so the
+          download button below is just a local copy, not "the save action". */}
+      {savedPaper?(
+        <div style={{padding:"10px 14px",background:T.greenBg||"rgba(0,200,120,0.08)",borderRadius:6,
+          border:`1px solid ${T.green}40`,fontSize:12,color:T.green,marginBottom:16,
+          display:"flex",justifyContent:"space-between",alignItems:"center",gap:12,flexWrap:"wrap"}}>
+          <span>✓ Automatically saved as a draft in Papers.</span>
+          {onViewPaper&&(
+            <button onClick={onViewPaper} style={{fontSize:12,fontWeight:600,color:T.green,
+              background:"none",border:`1px solid ${T.green}60`,borderRadius:6,
+              padding:"4px 10px",cursor:"pointer",fontFamily:"inherit"}}>
+              View in Papers →
+            </button>
+          )}
+        </div>
+      ):saveError?(
+        <div style={{padding:"10px 14px",background:T.amberBg,borderRadius:6,
+          border:`1px solid ${T.amber}40`,fontSize:12,color:T.amber,marginBottom:16,textAlign:"center"}}>
+          ⚠ Couldn't save to Papers ({saveError}) — download the file now so you don't lose it.
+        </div>
+      ):(
+        <div style={{padding:"10px 14px",background:T.bg3,borderRadius:6,
+          border:`1px solid ${T.border}`,fontSize:12,color:T.text3,marginBottom:16,textAlign:"center"}}>
+          Saving to Papers…
+        </div>
+      )}
+
       <div style={{display:"flex",justifyContent:"center",marginBottom:16}}>
         <Btn style={{padding:"14px 40px",fontSize:15,fontWeight:700}}
-          onClick={(event)=>{
-            const btn=event?.currentTarget||event?.target;
-            downloadBlob(docxBlob,fileName);
-            btn.textContent="✓ Downloaded & saved as draft";
-            setTimeout(()=>{btn.textContent="↓ Download & save as draft";},4000);
-          }}>
-          ↓ Download &amp; save as draft
+          onClick={()=>downloadBlob(docxBlob,fileName)}>
+          ↓ Download .docx
         </Btn>
       </div>
       <div style={{padding:"10px 14px",background:T.amberBg,borderRadius:6,
@@ -10518,7 +10675,7 @@ const AutoGenBtn = ({label, onClick}) => {
 
 const ValidateGeneratePanel = ({ outcomes, refs, compound, project,
   projectId, onUpdateProject, allPatients=[], activeCompound="",
-  onNavToOverview, onNavToRefs, onNavToResults, setPapers }) => {
+  onNavToOverview, onNavToRefs, onNavToResults, setPapers, onViewPaper }) => {
 
   const [genMode,      setGenMode]      = useState(false);
   const [serverResult, setServerResult] = useState(null);
@@ -10692,7 +10849,7 @@ useEffect(()=>{
   if(genMode) return (
     <GenerationPanel outcomes={compOutcomes} refs={refs} compound={compound}
       project={project} projectId={projectId} onBack={()=>setGenMode(false)}
-      setPapers={setPapers}/>
+      setPapers={setPapers} onViewPaper={onViewPaper}/>
   );
 
   // Primary compound details from patient data
@@ -12448,6 +12605,26 @@ const PaperReviewScreen = ({ paperId, email, onBack, onSignOut }) => {
           </div>
         )}
 
+        {/* Preface / Executive Summary — orient the reviewer before the full
+            draft, same relationship an abstract has to a paper. */}
+        {paper?.preface&&(
+          <div style={{background:"#0F1923",borderRadius:10,padding:20,border:"1px solid #1A2A3A",marginBottom:20}}>
+            <div style={{fontSize:10,color:"#00D2C8",fontWeight:700,textTransform:"uppercase",letterSpacing:"0.06em",marginBottom:12}}>
+              Preface / Executive Summary
+            </div>
+            {[
+              ["overview","Overview"],["problem_statement","Problem Statement"],["motivation","Motivation"],
+              ["objectives","Objectives"],["scope","Scope"],["methodology","Methodology"],
+              ["expected_contributions","Expected Contributions"],["reviewer_guidance","Reviewer Guidance"],
+            ].map(([key,label])=>paper.preface?.[key]&&(
+              <div key={key} style={{marginBottom:10}}>
+                <div style={{fontSize:11,color:"#5A7A9A",fontWeight:600,marginBottom:2}}>{label}</div>
+                <div style={{fontSize:13,color:"#DCE6F5",lineHeight:1.5}}>{paper.preface[key]}</div>
+              </div>
+            ))}
+          </div>
+        )}
+
         <div style={{background:"#0F1923",borderRadius:10,padding:20,border:"1px solid #1A2A3A",marginBottom:20}}>
           <div style={{fontSize:10,color:"#00D2C8",fontWeight:700,textTransform:"uppercase",letterSpacing:"0.06em",marginBottom:12}}>
             Draft · would become v{paper?.nextVersion||1}
@@ -12608,6 +12785,26 @@ const PostPublicationValidationScreen = ({ paperId, email, onBack, onSignOut }) 
           </div>
         )}
 
+        {/* Preface / Executive Summary — the "why" framing before the
+            itemized implemented-changes list and full published text. */}
+        {paper?.preface&&(
+          <div style={{background:"#0F1923",borderRadius:10,padding:20,border:"1px solid #1A2A3A",marginBottom:20}}>
+            <div style={{fontSize:10,color:"#00D2C8",fontWeight:700,textTransform:"uppercase",letterSpacing:"0.06em",marginBottom:12}}>
+              Preface / Executive Summary
+            </div>
+            {[
+              ["overview","Overview"],["problem_statement","Problem Statement"],["motivation","Motivation"],
+              ["objectives","Objectives"],["scope","Scope"],["methodology","Methodology"],
+              ["expected_contributions","Expected Contributions"],["reviewer_guidance","Reviewer Guidance"],
+            ].map(([key,label])=>paper.preface?.[key]&&(
+              <div key={key} style={{marginBottom:10}}>
+                <div style={{fontSize:11,color:"#5A7A9A",fontWeight:600,marginBottom:2}}>{label}</div>
+                <div style={{fontSize:13,color:"#DCE6F5",lineHeight:1.5}}>{paper.preface[key]}</div>
+              </div>
+            ))}
+          </div>
+        )}
+
         <div style={{background:"#0F1923",borderRadius:10,padding:20,border:"1px solid #1A2A3A",marginBottom:20}}>
           <div style={{fontSize:10,color:"#00D2C8",fontWeight:700,textTransform:"uppercase",letterSpacing:"0.06em",marginBottom:12}}>
             Final Published Paper (v{paper?.version})
@@ -12673,13 +12870,17 @@ const PostPublicationValidationScreen = ({ paperId, email, onBack, onSignOut }) 
 
 const DoctorApp = ({ user, onSignOut, urlStudyId="", urlReviewPaperId="", urlValidatePaperId="" }) => {
   const email = user?.email||"";
+  const toast = useToast();
 
   // Papers this doctor has been invited to review — loaded from Supabase
   const [reviewInvitations, setReviewInvitations] = useState([]);
   const [activeReviewPaperId, setActiveReviewPaperId] = useState(urlReviewPaperId||null);
   useEffect(()=>{
     if(!email) return;
-    API.listMyReviewInvitations(email).then(list=>setReviewInvitations(list||[])).catch(()=>setReviewInvitations([]));
+    API.listMyReviewInvitations(email).then(list=>setReviewInvitations(list||[])).catch(e=>{
+      toast.error(e.message||"Couldn't load your review invitations — try refreshing the page.");
+      setReviewInvitations([]);
+    });
   },[email]);
 
   // Papers this doctor has been invited to give final validation on
@@ -12688,7 +12889,10 @@ const DoctorApp = ({ user, onSignOut, urlStudyId="", urlReviewPaperId="", urlVal
   const [activeValidatePaperId, setActiveValidatePaperId] = useState(urlValidatePaperId||null);
   useEffect(()=>{
     if(!email) return;
-    API.listMyValidationInvitations(email).then(list=>setValidationInvitations(list||[])).catch(()=>setValidationInvitations([]));
+    API.listMyValidationInvitations(email).then(list=>setValidationInvitations(list||[])).catch(e=>{
+      toast.error(e.message||"Couldn't load your validation invitations — try refreshing the page.");
+      setValidationInvitations([]);
+    });
   },[email]);
 
   // Studies this doctor is invited to — loaded from Supabase
@@ -15151,17 +15355,25 @@ export default function App(){
     // setOutcomes updater — that callback isn't guaranteed to run
     // synchronously, so a variable assigned inside it (toPersist=...) can
     // still read back as null on the very next line.
-    const existingByKey=new Map(outcomes.map(o=>[o._patientId+"|"+o.outcome_name,o]));
+    // Keyed by study_ref_id (a real, persisted column: `${patientId}-OBS`),
+    // NOT _patientId — that field is client-only and is never saved to the
+    // DB (study_outcomes has no patient_id column), so a dedup key built
+    // from it only ever matched within the same unbroken browser session.
+    // The moment `outcomes` gets refetched fresh from the DB (page reload,
+    // revisiting the tab), every row's _patientId comes back undefined,
+    // the key stops matching, and every re-import silently created a fresh
+    // duplicate pair of rows per patient instead of updating the old ones.
+    const existingByKey=new Map(outcomes.map(o=>[o.study_ref_id+"|"+o.outcome_name,o]));
     // Reuse the existing row's id when we've imported this patient/outcome
     // before, so the upsert below updates that row instead of silently
     // being skipped (stale local state) or creating a duplicate row
     // (fresh random id every import).
     const merged=scored.map(o=>{
-      const existing=existingByKey.get(o._patientId+"|"+o.outcome_name);
+      const existing=existingByKey.get(o.study_ref_id+"|"+o.outcome_name);
       return existing?{...o,id:existing.id}:o;
     });
-    const mergedKeys=new Set(merged.map(o=>o._patientId+"|"+o.outcome_name));
-    const untouched=outcomes.filter(o=>!mergedKeys.has(o._patientId+"|"+o.outcome_name));
+    const mergedKeys=new Set(merged.map(o=>o.study_ref_id+"|"+o.outcome_name));
+    const untouched=outcomes.filter(o=>!mergedKeys.has(o.study_ref_id+"|"+o.outcome_name));
     const toPersist=merged;
     try{
       await API.saveOutcomes(project.id, toPersist);
@@ -15616,7 +15828,7 @@ export default function App(){
                   onNavToOverview={()=>setCompoundTab("overview")}
                   onNavToRefs={()=>setCompoundTab("refs")}
                   onNavToResults={()=>setCompoundTab("results")}
-                  setPapers={setPapers}/>
+                  setPapers={setPapers} onViewPaper={()=>setActiveTab("papers")}/>
               )}
 
               {activeTab==="evidence"&&project&&(
@@ -15681,7 +15893,7 @@ export default function App(){
                   activeCompound={activeCompound||compound?.name||compound?.compound_name||""}
                   onUpdateProject={updateProjectFull}
                   allPatients={allPatients}
-                  setPapers={setPapers}/>
+                  setPapers={setPapers} onViewPaper={()=>setActiveTab("papers")}/>
               )}
 
               {activeTab==="doctors"&&selectedStudy&&(
@@ -15710,6 +15922,11 @@ export default function App(){
                     papers={papers}
                     onUpdate={async (p) => {
                       setPapers(prev => prev.map(x => x.id === p.id ? { ...p, updatedAt: Date.now() } : x));
+                      // Preface regeneration for a file replace is triggered
+                      // from PapersPanel's handleUpload itself (via
+                      // runGeneratePreface, after this resolves) — that gives
+                      // a visible "Regenerating…" state on the Preface card's
+                      // button instead of happening invisibly here.
                       try {
                         if (p.status !== "published") {
                           await API.updatePaperDraft(p.id, {
@@ -15761,16 +15978,89 @@ export default function App(){
                     projectId={project?.id}
                     onGenerateAIDraft={async (paperId) => {
                       if (!project?.id) throw new Error("Select a project first");
-                      await API.generateAIDraft(project.id, { paperId });
+                      // The one canonical template (buildDocxBlob) for every
+                      // draft-producing action — same computed Abstract/
+                      // Results tables + AI narrative used by "Validate &
+                      // Generate", just triggered from here instead.
+                      const { blob, narrative } = await buildDocxBlob(project, compound, outcomes, refs, ()=>{}, paperId||null);
+                      const fileName = `${(project?.paper_title||compound?.compound_name||"Paper").replace(/[^\w\-]+/g,"_")}.docx`;
+                      const fileData = await new Promise((resolve, reject) => {
+                        const reader = new FileReader();
+                        reader.onload = () => resolve(reader.result);
+                        reader.onerror = reject;
+                        reader.readAsDataURL(blob);
+                      });
+                      const existingDraft = paperId ? papers.find(p => p.groupId === paperId) : null;
+                      if (existingDraft) {
+                        const newDraft = await API.regenerateAIDraft(existingDraft.id, { fileName, fileData, fileSize: blob.size, narrativeContent: narrative });
+                        // "Regenerate with AI" is a major revision by definition —
+                        // always refresh the preface to match the new narrative.
+                        await autoGeneratePreface(project, outcomes, paperId, newDraft?.id, toast);
+                      } else {
+                        // paperId may already exist (preface created first, feature #3
+                        // ordering) even though no local draft is loaded for it yet.
+                        let existingPrefaceId = null;
+                        if (paperId) {
+                          const prefaces = await API.listPrefaces(paperId).catch(() => []);
+                          existingPrefaceId = prefaces?.[0]?.id || null;
+                        }
+                        const created = await API.createPaperDraft(project.id, {
+                          title: project?.paper_title || (compound?.compound_name || "") + " Evidence Synthesis",
+                          compound: compound?.compound_name || "",
+                          htmlContent: "", narrativeContent: narrative,
+                          fileName, fileData, fileSize: blob.size,
+                          notes: "Generated by AI draft assistant",
+                          existingPaperId: paperId || undefined, existingPrefaceId,
+                        });
+                        // Only generate a preface here if one didn't already
+                        // exist (the preface-first ordering already covers
+                        // that case via existingPrefaceId above).
+                        if (!existingPrefaceId) await autoGeneratePreface(project, outcomes, created.groupId, created.id, toast);
+                      }
                       await loadPapers(project.id);
                     }}
                     onGeneratePreface={async (paperId) => {
                       if (!project?.id) throw new Error("Select a project first");
-                      const result = await API.generatePreface(project.id, { paperId });
+                      const metrics = computeEvidenceMetrics(outcomes, project);
+                      const result = await API.generatePreface(project.id, { paperId, metrics });
+                      // Backfill the relationship onto whichever draft this
+                      // preface belongs to (migration 022: "may be filled in
+                      // exactly once from null") — a no-op if already set.
+                      const targetDraft = paperId ? papers.find(p => p.groupId === paperId) : null;
+                      if (targetDraft && result?.prefaceId) {
+                        API.updatePaperDraft(targetDraft.id, { prefaceId: result.prefaceId }).catch(e => {
+                          // Expected/harmless: the guard trigger rejects setting
+                          // preface_id once it's already non-null on this draft.
+                          if (!/preface_id cannot be changed/i.test(e.message||"")) {
+                            toast.error("Preface generated, but couldn't be linked to the current draft: " + (e.message||"unknown error"));
+                          }
+                        });
+                      }
                       return result;
                     }}
                     onGenerateReconciledDraft={async (paperId, reconciliationId) => {
                       const result = await API.generateReconciledDraft(paperId, reconciliationId);
+                      // The server only revised narrative_content; render the
+                      // actual .docx from it here (no AI call — buildDocxBlob's
+                      // precomputedNarrative param skips straight to assembly)
+                      // so the reconciled draft is an actual downloadable file,
+                      // not just an update comment_change_map can point at.
+                      if (result?.narrativeContent) {
+                        try {
+                          const { blob } = await buildDocxBlob(project, compound, outcomes, refs, ()=>{}, paperId, result.narrativeContent);
+                          const fileName = `${(project?.paper_title||compound?.compound_name||"Paper").replace(/[^\w\-]+/g,"_")}.docx`;
+                          const fileData = await new Promise((resolve, reject) => {
+                            const reader = new FileReader();
+                            reader.onload = () => resolve(reader.result);
+                            reader.onerror = reject;
+                            reader.readAsDataURL(blob);
+                          });
+                          await API.updatePaperDraft(result.draftId, { fileName, fileData, fileSize: blob.size });
+                        } catch (e) {
+                          console.warn('[onGenerateReconciledDraft] docx rebuild failed', e.message);
+                          toast.error("The reconciled draft's content was saved, but the downloadable .docx couldn't be rebuilt: " + (e.message||"unknown error") + ". Try Regenerate with AI to fix the file.");
+                        }
+                      }
                       await loadPapers(project?.id || null);
                       return result;
                     }}
